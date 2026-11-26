@@ -1,19 +1,23 @@
 use crate::config::{save_config, uninstall_all_tools, uninstall_tool, update_installed_flags};
-use crate::installer::{download_file, extract_or_install, extract_zip, find_executable};
+use crate::installer::{download_file, extract_7z, extract_or_install, extract_zip, find_executable};
 use crate::models::{
     format_bytes, AddonMod, AppConfig, CameraFixResult, GameBananaFeedResponse, GameBananaFile,
-    GameBananaModDetail, GameBananaModItem, InstallProgress, ModDownloadProgress, SavedModMeta,
-    SteamAccountInfo, Tool,
+    GameBananaModDetail, GameBananaModItem, InstallProgress, LogEntry, ModDownloadProgress,
+    SavedModMeta, SteamAccountInfo, Tool, VanillaLaunchResult,
 };
 use crate::steam::{
-    addons_dir, find_deadlock_dir, launch_deadlock, list_installed_addons, open_in_browser,
-    open_in_file_manager, save_mod_metadata, toggle_addon,
+    addons_dir, assert_inside_addons, find_deadlock_dir, get_disk_free_bytes, launch_deadlock,
+    launch_deadlock_vanilla, list_installed_addons, open_in_browser, open_in_file_manager,
+    restore_addons_after_vanilla, sanitize_addon_filename, sanitize_incoming_vpk_filename,
+    save_mod_metadata, toggle_addon,
 };
 use crate::vpk::VpkWriter;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState(pub Mutex<AppConfig>);
+pub struct LoggerState(pub crate::logger::SessionLogger);
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
@@ -298,6 +302,7 @@ pub async fn toggle_addon_state(
     filename: String,
     enable: bool,
     state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
 ) -> Result<Vec<AddonMod>, String> {
     let citadel = {
         let cfg = state.0.lock().unwrap();
@@ -306,21 +311,38 @@ pub async fn toggle_addon_state(
             .ok_or_else(|| "Deadlock path not configured".to_string())?
     };
     toggle_addon(&citadel, &filename, enable).map_err(|e| e.to_string())?;
+    logger.0.write(
+        "info",
+        &format!("Addon '{}' {}", filename, if enable { "enabled" } else { "disabled" }),
+    );
     Ok(list_installed_addons(&citadel))
 }
 
+/// FIX §2.9 — delete_addon with path traversal protection.
 #[tauri::command]
-pub async fn delete_addon(filename: String, state: State<'_, AppState>) -> Result<Vec<AddonMod>, String> {
+pub async fn delete_addon(
+    filename: String,
+    state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
+) -> Result<Vec<AddonMod>, String> {
     let citadel = {
         let cfg = state.0.lock().unwrap();
         cfg.deadlock_game_dir
             .clone()
             .ok_or_else(|| "Deadlock path not configured".to_string())?
     };
+    // Sanitize filename before any filesystem operation
+    sanitize_addon_filename(&filename).map_err(|e| e.to_string())?;
+
     let addons = addons_dir(&citadel).map_err(|e| e.to_string())?;
     let path = addons.join(&filename);
+
+    // Belt-and-suspenders: confirm path stays inside addons/
+    assert_inside_addons(&addons, &path).map_err(|e| e.to_string())?;
+
     if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        logger.0.write("warn", &format!("Deleted addon '{}'", filename));
     }
     Ok(list_installed_addons(&citadel))
 }
@@ -338,13 +360,17 @@ pub async fn deploy_vpk_file(
     };
     let addons = addons_dir(&citadel).map_err(|e| e.to_string())?;
     let src = std::path::PathBuf::from(&vpk_path);
-    if !src.exists() {
+    if !src.exists() || !src.is_file() {
         return Err("Source VPK file does not exist".to_string());
     }
-    let fname = src
+    let raw_fname = src
         .file_name()
+        .and_then(|n| n.to_str())
         .ok_or_else(|| "Invalid file name".to_string())?;
-    let dst = addons.join(fname);
+    let safe_fname = sanitize_incoming_vpk_filename(raw_fname);
+    sanitize_addon_filename(&safe_fname).map_err(|e| e.to_string())?;
+    let dst = addons.join(&safe_fname);
+    assert_inside_addons(&addons, &dst).map_err(|e| e.to_string())?;
     std::fs::copy(&src, &dst).map_err(|e| format!("Failed to copy VPK file: {}", e))?;
     Ok(list_installed_addons(&citadel))
 }
@@ -384,13 +410,59 @@ pub async fn ping_gamebanana() -> Result<u64, String> {
     Ok(ms)
 }
 
+/// FIX §2.1 — Vanilla launch with physical addon isolation.
+/// Renames all .vpk files to .vpk.vanilla_off before launching Steam.
 #[tauri::command]
-pub async fn launch_game_vanilla(_state: State<'_, AppState>) -> Result<(), String> {
-    crate::steam::launch_deadlock_vanilla().map_err(|e| e.to_string())
+pub async fn launch_game_vanilla(
+    state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
+) -> Result<VanillaLaunchResult, String> {
+    let citadel = {
+        let cfg = state.0.lock().unwrap();
+        cfg.deadlock_game_dir
+            .clone()
+            .ok_or_else(|| "Deadlock citadel directory not configured".to_string())?
+    };
+    let isolated = launch_deadlock_vanilla(&citadel).map_err(|e| e.to_string())?;
+    logger.0.write(
+        "info",
+        &format!("Launched Vanilla mode: isolated {} addon(s)", isolated),
+    );
+    Ok(VanillaLaunchResult {
+        isolated_count: isolated,
+        message: format!(
+            "Deadlock launched in Clean Vanilla mode. {} mod(s) temporarily isolated.",
+            isolated
+        ),
+    })
 }
 
+/// FIX §2.1 — Restore addons after Vanilla session.
 #[tauri::command]
-pub async fn fix_mods_camera(state: State<'_, AppState>) -> Result<CameraFixResult, String> {
+pub async fn restore_vanilla_addons(
+    state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
+) -> Result<usize, String> {
+    let citadel = {
+        let cfg = state.0.lock().unwrap();
+        cfg.deadlock_game_dir
+            .clone()
+            .ok_or_else(|| "Deadlock citadel directory not configured".to_string())?
+    };
+    let restored = restore_addons_after_vanilla(&citadel).map_err(|e| e.to_string())?;
+    logger.0.write(
+        "success",
+        &format!("Restored {} addon(s) after Vanilla session", restored),
+    );
+    Ok(restored)
+}
+
+/// FIX §2.2 — Camera Fix: writes to autoexec.cfg (not to addons/) so Source 2 actually reads it.
+#[tauri::command]
+pub async fn fix_mods_camera(
+    state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
+) -> Result<CameraFixResult, String> {
     let citadel = {
         let cfg = state.0.lock().unwrap();
         cfg.deadlock_game_dir
@@ -400,26 +472,46 @@ pub async fn fix_mods_camera(state: State<'_, AppState>) -> Result<CameraFixResu
     let addons = list_installed_addons(&citadel);
     let active_count = addons.iter().filter(|a| a.enabled).count();
 
-    let addons_dir = addons_dir(&citadel).map_err(|e| e.to_string())?;
-    let patch_path = addons_dir.join("dmbk_camera_fix.cfg");
-    let patch_content = "// Deadlock Camera Offset Fix for Custom Character Models (Violet update)\n\
-                         // Enforces default third-person eye level and hero root offset\n\
-                         c_thirdpersonshoulder 0\n\
-                         c_thirdpersonshoulderoffset 0\n\
-                         c_thirdpersonshoulderheight 0\n\
-                         cam_idealdist 140\n\
-                         cam_idealpitch 0\n\
-                         cam_idealyaw 0\n";
-    std::fs::write(&patch_path, patch_content)
-        .map_err(|e| format!("Failed to apply camera fix patch: {}", e))?;
+    // Write camera config to game/citadel/cfg/ where Source 2 can exec it
+    let cfg_dir = citadel.join("cfg");
+    std::fs::create_dir_all(&cfg_dir)
+        .map_err(|e| format!("Failed to create cfg directory: {}", e))?;
 
+    let camera_cfg_path = cfg_dir.join("dmbk_camera.cfg");
+    let camera_cfg_content = concat!(
+        "// DMBK Camera Fix — third-person shoulder offset correction\n",
+        "// Applied by Deadlock Mod Build Kit v1.5\n",
+        "c_thirdpersonshoulder 0\n",
+        "c_thirdpersonshoulderoffset 0\n",
+        "c_thirdpersonshoulderheight 0\n",
+        "cam_idealdist 140\n",
+        "cam_idealpitch 0\n",
+        "cam_idealyaw 0\n",
+    );
+    std::fs::write(&camera_cfg_path, camera_cfg_content)
+        .map_err(|e| format!("Failed to write dmbk_camera.cfg: {}", e))?;
+
+    // Inject exec directive into autoexec.cfg
+    let autoexec_path = cfg_dir.join("autoexec.cfg");
+    let exec_line = "exec dmbk_camera.cfg\n";
+    let existing = std::fs::read_to_string(&autoexec_path).unwrap_or_default();
+    if !existing.contains("exec dmbk_camera.cfg") {
+        let mut updated = existing;
+        updated.push_str(exec_line);
+        std::fs::write(&autoexec_path, &updated)
+            .map_err(|e| format!("Failed to update autoexec.cfg: {}", e))?;
+    }
+
+    let autoexec_display = autoexec_path.display().to_string();
+    logger.0.write("success", &format!("Applied Camera Fix to {}", autoexec_display));
     Ok(CameraFixResult {
         patched_count: active_count,
         verified_count: addons.len(),
         message: format!(
-            "Camera offsets patched & verified for {} custom mod(s). Ready for play.",
-            addons.len()
+            "Camera fix injected into autoexec.cfg. Active mods: {}. Restart Deadlock to apply.",
+            active_count
         ),
+        autoexec_path: autoexec_display,
     })
 }
 
@@ -548,6 +640,7 @@ pub async fn fetch_gamebanana_mods(
                 submitter_name,
                 submitter_avatar,
                 thumbnail_url,
+                profile_url: r["_sProfileUrl"].as_str().unwrap_or("").to_string(), // FIX §2.3
                 views,
                 likes,
                 date_added,
@@ -571,7 +664,13 @@ pub async fn fetch_gamebanana_mod_detail(
     item_type: Option<String>,
 ) -> Result<GameBananaModDetail, String> {
     let client = crate::installer::build_http_client().map_err(|e| e.to_string())?;
-    let model = item_type.unwrap_or_else(|| "Mod".to_string());
+    // Allowlist item_type characters to prevent URL path injection
+    let raw_model = item_type.unwrap_or_else(|| "Mod".to_string());
+    let model = if !raw_model.is_empty() && raw_model.chars().all(|c| c.is_ascii_alphanumeric()) {
+        raw_model
+    } else {
+        "Mod".to_string()
+    };
     let url = format!("https://gamebanana.com/apiv11/{}/{}/ProfilePage", model, mod_id);
 
     let resp = client
@@ -586,6 +685,16 @@ pub async fn fetch_gamebanana_mod_detail(
         .json()
         .await
         .map_err(|e| format!("Failed to parse GameBanana JSON: {}", e))?;
+
+    // FIX §2.3(3) — Validate that record belongs to Deadlock (game ID 20948)
+    if let Some(gid) = json["_aGame"]["_idRow"].as_u64() {
+        if gid != 20948 {
+            return Err(format!(
+                "Security/API mismatch: GameBanana item #{} belongs to game ID {} instead of Deadlock (20948).",
+                mod_id, gid
+            ));
+        }
+    }
 
     let name = json["_sName"].as_str().unwrap_or("Untitled Mod").to_string();
     let super_cat = json["_aSuperCategory"]["_sName"].as_str().unwrap_or("");
@@ -611,16 +720,20 @@ pub async fn fetch_gamebanana_mod_detail(
         .unwrap_or(date_added);
     let profile_url = json["_sProfileUrl"].as_str().unwrap_or("").to_string();
 
+    // FIX §2.3(4) — Extract preview images across all GameBanana image size keys
     let mut screenshots = Vec::new();
     if let Some(images) = json["_aPreviewMedia"]["_aImages"].as_array() {
         for img in images {
             let base = img["_sBaseUrl"].as_str().unwrap_or("");
-            let file = img["_sFile530"]
+            let file = img["_sFile800"]
                 .as_str()
+                .or_else(|| img["_sFile530"].as_str())
+                .or_else(|| img["_sFile220"].as_str())
                 .or_else(|| img["_sFile"].as_str())
+                .or_else(|| img["_sFile100"].as_str())
                 .unwrap_or("");
             if !base.is_empty() && !file.is_empty() {
-                screenshots.push(format!("{}/{}", base, file));
+                screenshots.push(format!("{}/{}", base.trim_end_matches('/'), file));
             }
         }
     }
@@ -707,6 +820,7 @@ pub async fn inspect_vpk(
     filename: String,
     state: State<'_, AppState>,
 ) -> Result<crate::vpk::VpkManifest, String> {
+    sanitize_addon_filename(&filename).map_err(|e| e.to_string())?;
     let citadel = {
         let cfg = state.0.lock().unwrap();
         cfg.deadlock_game_dir
@@ -715,6 +829,7 @@ pub async fn inspect_vpk(
     };
     let addons = addons_dir(&citadel).map_err(|e| e.to_string())?;
     let path = addons.join(&filename);
+    assert_inside_addons(&addons, &path).map_err(|e| e.to_string())?;
     if !path.exists() {
         return Err(format!("VPK file '{}' not found in citadel/addons", filename));
     }
@@ -730,7 +845,11 @@ pub async fn merge_addon_vpks(
     take_sounds_from: String, // "a" | "b" | "both" | "none"
     hero_name: Option<String>,
     state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
 ) -> Result<Vec<AddonMod>, String> {
+    sanitize_addon_filename(&vpk_a).map_err(|e| e.to_string())?;
+    sanitize_addon_filename(&vpk_b).map_err(|e| e.to_string())?;
+
     let citadel = {
         let cfg = state.0.lock().unwrap();
         cfg.deadlock_game_dir
@@ -741,6 +860,8 @@ pub async fn merge_addon_vpks(
 
     let path_a = addons.join(&vpk_a);
     let path_b = addons.join(&vpk_b);
+    assert_inside_addons(&addons, &path_a).map_err(|e| e.to_string())?;
+    assert_inside_addons(&addons, &path_b).map_err(|e| e.to_string())?;
 
     if !path_a.exists() {
         return Err(format!("Source VPK A '{}' not found", vpk_a));
@@ -749,11 +870,13 @@ pub async fn merge_addon_vpks(
         return Err(format!("Source VPK B '{}' not found", vpk_b));
     }
 
-    let mut safe_out = output_filename.trim().to_string();
+    let mut safe_out = sanitize_incoming_vpk_filename(output_filename.trim());
     if !safe_out.to_lowercase().ends_with(".vpk") {
         safe_out = format!("{}.vpk", safe_out);
     }
+    sanitize_addon_filename(&safe_out).map_err(|e| e.to_string())?;
     let target_out = addons.join(&safe_out);
+    assert_inside_addons(&addons, &target_out).map_err(|e| e.to_string())?;
 
     let mut cat_filters = std::collections::HashMap::new();
 
@@ -799,6 +922,7 @@ pub async fn merge_addon_vpks(
         description: Some(format!("Merged from {} and {}", vpk_a, vpk_b)),
     };
     let _ = save_mod_metadata(&citadel, &safe_out, meta);
+    logger.0.write("info", &format!("Merged VPKs {} + {} -> {}", vpk_a, vpk_b, safe_out));
 
     Ok(list_installed_addons(&citadel))
 }
@@ -811,6 +935,7 @@ pub async fn create_custom_mod(
     author: Option<String>,
     apply_camera_fix: bool,
     state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
 ) -> Result<Vec<AddonMod>, String> {
     let citadel = {
         let cfg = state.0.lock().unwrap();
@@ -820,16 +945,18 @@ pub async fn create_custom_mod(
     };
     let addons = addons_dir(&citadel).map_err(|e| e.to_string())?;
 
-    let clean_hero = hero_name.to_lowercase().replace([' ', '-', '&'], "_");
-    let mut safe_name = name.trim().to_lowercase().replace([' ', '/', '\\'], "_");
+    let clean_hero = sanitize_incoming_vpk_filename(&hero_name.to_lowercase());
+    let mut safe_name = sanitize_incoming_vpk_filename(&name.trim().to_lowercase());
     if !safe_name.starts_with(&clean_hero) {
         safe_name = format!("{}_{}", clean_hero, safe_name);
     }
     if !safe_name.ends_with(".vpk") {
         safe_name = format!("{}.vpk", safe_name);
     }
+    sanitize_addon_filename(&safe_name).map_err(|e| e.to_string())?;
 
     let target_out = addons.join(&safe_name);
+    assert_inside_addons(&addons, &target_out).map_err(|e| e.to_string())?;
 
     let mut writer = VpkWriter::new();
     let marker_text = format!(
@@ -865,6 +992,7 @@ pub async fn create_custom_mod(
         description: Some("Custom package authored via DMBK Create Mod Wizard".into()),
     };
     let _ = save_mod_metadata(&citadel, &safe_name, meta);
+    logger.0.write("success", &format!("Created custom mod package: {}", safe_name));
 
     Ok(list_installed_addons(&citadel))
 }
@@ -880,7 +1008,9 @@ pub async fn install_gamebanana_mod(
     thumbnail_url: Option<String>,
     author: Option<String>,
     description: Option<String>,
+    profile_url: Option<String>,
     state: State<'_, AppState>,
+    logger: State<'_, LoggerState>,
 ) -> Result<Vec<AddonMod>, String> {
     let (citadel, install_dir) = {
         let cfg = state.0.lock().unwrap();
@@ -894,12 +1024,13 @@ pub async fn install_gamebanana_mod(
     let addons = addons_dir(&citadel).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&addons).map_err(|e| format!("Failed to create addons dir: {}", e))?;
 
-    let safe_filename = filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let safe_filename = sanitize_incoming_vpk_filename(&filename);
+    sanitize_addon_filename(&safe_filename).map_err(|e| e.to_string())?;
     let cache_dir = install_dir.join("cache");
     let _ = std::fs::create_dir_all(&cache_dir);
     let dest_file = cache_dir.join(&safe_filename);
 
-    let emit = |state_name: &str, progress: f32, msg: &str, speed: f32| {
+    let emit = |state_name: &str, progress: f32, msg: &str, speed: f32, done_b: u64, total_b: u64| {
         let _ = app.emit(
             "mod_download_progress",
             ModDownloadProgress {
@@ -909,11 +1040,14 @@ pub async fn install_gamebanana_mod(
                 progress,
                 message: msg.into(),
                 speed_mbps: speed,
+                downloaded_bytes: done_b,
+                total_bytes: total_b,
             },
         );
     };
 
-    emit("downloading", 0.0, "Initiating download from GameBanana…", 0.0);
+    logger.0.write("info", &format!("Downloading mod #{} ({})", mod_id, safe_filename));
+    emit("downloading", 0.0, "Initiating download from GameBanana…", 0.0, 0, 0);
 
     let app_clone = app.clone();
     let safe_filename_clone = safe_filename.clone();
@@ -942,21 +1076,24 @@ pub async fn install_gamebanana_mod(
                 progress,
                 message: msg,
                 speed_mbps: speed,
+                downloaded_bytes: done,
+                total_bytes: total,
             },
         );
     })
     .await
     .map_err(|e| {
-        emit("error", 0.0, &format!("Download failed: {}", e), 0.0);
+        emit("error", 0.0, &format!("Download failed: {}", e), 0.0, 0, 0);
         e.to_string()
     })?;
 
-    emit("extracting", 0.95, "Deploying into Deadlock addons directory…", 0.0);
+    emit("extracting", 0.95, "Deploying into Deadlock addons directory…", 0.0, 0, 0);
 
     let mut installed_filenames = Vec::new();
     let lower = safe_filename.to_lowercase();
     if lower.ends_with(".vpk") {
         let target = addons.join(&safe_filename);
+        assert_inside_addons(&addons, &target).map_err(|e| e.to_string())?;
         std::fs::copy(&dest_file, &target)
             .map_err(|e| format!("Failed to copy VPK file to addons: {}", e))?;
         installed_filenames.push(safe_filename.clone());
@@ -975,8 +1112,7 @@ pub async fn install_gamebanana_mod(
 
         tokio::task::spawn_blocking(move || {
             if is_7z {
-                sevenz_rust::decompress_file(&archive_path, &staging_clone)
-                    .map_err(|e| anyhow::anyhow!("7-Zip extraction error: {:?}", e))
+                extract_7z(&archive_path, &staging_clone)
             } else {
                 extract_zip(&archive_path, &staging_clone)
             }
@@ -984,7 +1120,7 @@ pub async fn install_gamebanana_mod(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| {
-            emit("error", 0.0, &format!("Extraction failed: {}", e), 0.0);
+            emit("error", 0.0, &format!("Extraction failed: {}", e), 0.0, 0, 0);
             e.to_string()
         })?;
 
@@ -993,28 +1129,36 @@ pub async fn install_gamebanana_mod(
 
         if !vpk_files.is_empty() {
             for vpk in &vpk_files {
-                if let Some(fname) = vpk.file_name() {
-                    let target = addons.join(fname);
-                    let _ = std::fs::copy(vpk, &target);
-                    if let Some(s) = fname.to_str() {
-                        installed_filenames.push(s.to_string());
+                if let Some(raw_fname) = vpk.file_name().and_then(|n| n.to_str()) {
+                    let clean_vpk = sanitize_incoming_vpk_filename(raw_fname);
+                    let target = addons.join(&clean_vpk);
+                    if assert_inside_addons(&addons, &target).is_ok() {
+                        std::fs::copy(vpk, &target)
+                            .map_err(|e| format!("Failed to deploy VPK {}: {}", clean_vpk, e))?;
+                        installed_filenames.push(clean_vpk);
                     }
                 }
             }
         } else {
-            let _ = copy_dir_recursive(&staging_dir, &addons);
+            let _ = copy_dir_recursive_safe(&staging_dir, &addons);
             installed_filenames.push(safe_filename.clone());
         }
 
         let _ = std::fs::remove_dir_all(&staging_dir);
     } else {
         let target = addons.join(&safe_filename);
+        assert_inside_addons(&addons, &target).map_err(|e| e.to_string())?;
         std::fs::copy(&dest_file, &target)
             .map_err(|e| format!("Failed to copy file: {}", e))?;
         installed_filenames.push(safe_filename.clone());
     }
 
-    // Persist rich metadata linked to hero and GameBanana
+    // Resolve actual source URL (§2.3: never reconstruct wrong /mods/ ID URL if profile_url was given)
+    let resolved_source_url = profile_url
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .unwrap_or_else(|| format!("https://gamebanana.com/mods/{}", mod_id));
+
+    // Persist rich metadata linked to hero (optional for global mods §2.5) and GameBanana
     for fname in &installed_filenames {
         let (auto_hero, auto_cat) = crate::steam::detect_hero_and_category(fname);
         let final_hero = hero_name.clone().or(auto_hero);
@@ -1026,13 +1170,14 @@ pub async fn install_gamebanana_mod(
             thumbnail_url: thumbnail_url.clone(),
             author: author.clone(),
             category: Some(auto_cat),
-            source_url: Some(format!("https://gamebanana.com/mods/{}", mod_id)),
+            source_url: Some(resolved_source_url.clone()),
             description: description.clone(),
         };
         let _ = save_mod_metadata(&citadel, fname, meta);
     }
 
-    emit("done", 1.0, "Installed successfully into citadel/addons!", 0.0);
+    logger.0.write("success", &format!("Installed {} file(s) from mod #{}", installed_filenames.len(), mod_id));
+    emit("done", 1.0, "Installed successfully into citadel/addons!", 0.0, 0, 0);
     Ok(list_installed_addons(&citadel))
 }
 
@@ -1053,19 +1198,124 @@ fn find_files_with_ext(dir: &std::path::Path, ext: &str, results: &mut Vec<std::
     }
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+fn copy_dir_recursive_safe(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
+    let canon_dst = dst.canonicalize()?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let ftype = entry.file_type()?;
+        if ftype.is_symlink() {
+            continue;
+        }
         let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
+        let raw_name = entry.file_name().to_string_lossy().to_string();
+        let safe_name = sanitize_incoming_vpk_filename(&raw_name);
+        let dst_path = canon_dst.join(&safe_name);
+        if ftype.is_dir() {
+            copy_dir_recursive_safe(&src_path, &dst_path)?;
+        } else if assert_inside_addons(&canon_dst, &dst_path).is_ok() {
             std::fs::copy(&src_path, &dst_path)?;
         }
     }
     Ok(())
+}
+
+// ── v1.5 New Commands ─────────────────────────────────────────────────────────
+
+/// Get game console log entries with `[GAME]` metadata (§2.8).
+#[tauri::command]
+pub async fn get_game_logs(state: State<'_, AppState>) -> Result<Vec<LogEntry>, String> {
+    let citadel = {
+        let cfg = state.0.lock().unwrap();
+        cfg.deadlock_game_dir.clone()
+    };
+    if let Some(c) = citadel {
+        Ok(crate::logger::read_game_console_entries(&c, 200))
+    } else {
+        Ok(vec![])
+    }
+}
+
+/// Append a log entry to the active session log file on disk (§2.8).
+#[tauri::command]
+pub async fn write_session_log(
+    level: String,
+    message: String,
+    logger: State<'_, LoggerState>,
+) -> Result<(), String> {
+    logger.0.write(&level, &message);
+    Ok(())
+}
+
+/// Open native save dialog and export logs to user-selected file (§4.7.3).
+#[tauri::command]
+pub async fn save_logs_dialog(app: AppHandle, content: String) -> Result<bool, String> {
+    let app_clone = app.clone();
+    let chosen = tokio::task::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .set_file_name("dmbk_session.log")
+            .add_filter("Log / Text", &["log", "txt"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some(fp) = chosen {
+        let path = fp.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&path, content.as_bytes())
+            .map_err(|e| format!("Failed to write log file: {}", e))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Get free disk space in bytes on the game/install drive (§4.1.3).
+#[tauri::command]
+pub async fn get_disk_free_space(state: State<'_, AppState>) -> Result<Option<u64>, String> {
+    let target = {
+        let cfg = state.0.lock().unwrap();
+        cfg.deadlock_game_dir
+            .clone()
+            .unwrap_or_else(|| cfg.install_dir.clone())
+    };
+    Ok(get_disk_free_bytes(&target))
+}
+
+/// Open logs directory in file manager.
+#[tauri::command]
+pub async fn open_logs_folder(state: State<'_, AppState>) -> Result<(), String> {
+    let install_dir = state.0.lock().unwrap().install_dir.clone();
+    let log_dir = install_dir.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    open_in_file_manager(&log_dir).map_err(|e| e.to_string())
+}
+
+/// Get/set UI language setting.
+#[tauri::command]
+pub async fn set_ui_language(lang: String, state: State<'_, AppState>) -> Result<AppConfig, String> {
+    if lang != "ru" && lang != "en" {
+        return Err("Language must be 'ru' or 'en'".to_string());
+    }
+    let mut cfg = state.0.lock().unwrap();
+    cfg.ui_language = Some(lang);
+    crate::config::save_config(&cfg).map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
+}
+
+/// Get/set UI scale setting.
+#[tauri::command]
+pub async fn set_ui_scale(scale: u32, state: State<'_, AppState>) -> Result<AppConfig, String> {
+    let valid = [80u32, 90, 100, 110, 125, 140];
+    if !valid.contains(&scale) {
+        return Err(format!("Scale must be one of: {:?}", valid));
+    }
+    let mut cfg = state.0.lock().unwrap();
+    cfg.ui_scale = Some(scale);
+    crate::config::save_config(&cfg).map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
 }
 
 #[cfg(test)]

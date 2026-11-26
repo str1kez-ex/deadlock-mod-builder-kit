@@ -97,8 +97,7 @@ pub fn extract_or_install(archive_path: &Path, dest_dir: &Path, file_type: &str,
 
     match file_type {
         "7z" => {
-            sevenz_rust::decompress_file(archive_path, dest_dir)
-                .map_err(|e| anyhow::anyhow!("7-Zip extraction failed: {:?}", e))?;
+            extract_7z(archive_path, dest_dir)?;
         }
         "zip" => {
             extract_zip(archive_path, dest_dir)?;
@@ -110,20 +109,25 @@ pub fn extract_or_install(archive_path: &Path, dest_dir: &Path, file_type: &str,
             extract_tar_xz(archive_path, dest_dir)?;
         }
         "exe" => {
-            let target_exe = dest_dir.join(expected_exe);
+            let safe_exe = crate::steam::sanitize_incoming_vpk_filename(expected_exe);
+            let target_exe = dest_dir.join(safe_exe);
             std::fs::copy(archive_path, &target_exe)
                 .with_context(|| format!("Failed to copy executable to {}", target_exe.display()))?;
         }
         "msi" => {
-            let target = dest_dir.join(archive_path.file_name().unwrap_or_default());
+            let fname = archive_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(crate::steam::sanitize_incoming_vpk_filename)
+                .unwrap_or_else(|| "installer.msi".to_string());
+            let target = dest_dir.join(fname);
             std::fs::copy(archive_path, &target)
                 .with_context(|| format!("Failed to copy MSI to {}", target.display()))?;
         }
         _ => {
             let name = archive_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.ends_with(".7z") {
-                sevenz_rust::decompress_file(archive_path, dest_dir)
-                    .map_err(|e| anyhow::anyhow!("7-Zip extraction failed: {:?}", e))?;
+                extract_7z(archive_path, dest_dir)?;
             } else if name.ends_with(".zip") {
                 extract_zip(archive_path, dest_dir)?;
             } else {
@@ -135,26 +139,168 @@ pub fn extract_or_install(archive_path: &Path, dest_dir: &Path, file_type: &str,
     Ok(())
 }
 
+/// Validates a relative path inside an archive before any directory or file is created.
+/// Rejects `..`, root dirs, drive prefixes, backslashes-as-traversal, and empty paths (§5.3).
+pub fn validate_archive_entry_path(raw_name: &str) -> Result<PathBuf> {
+    let normalized = raw_name.replace('\\', "/");
+    let mut clean = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let s = part.to_string_lossy();
+                if s == ".." || s.contains('\0') {
+                    anyhow::bail!("Zip-slip detected: invalid entry component {:?}", raw_name);
+                }
+                clean.push(part);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                anyhow::bail!("Zip-slip detected: entry {:?} escapes destination directory", raw_name);
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        anyhow::bail!("Zip-slip detected: empty entry path");
+    }
+    Ok(clean)
+}
+
+/// Safe 7z extraction with strict Zip-Slip prevention (§5.3).
+pub fn extract_7z(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("Failed to create destination directory: {}", dest_dir.display()))?;
+    let canonical_dest = dest_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot canonicalize destination: {}", dest_dir.display()))?;
+
+    sevenz_rust::decompress_file_with_extract_fn(archive_path, &canonical_dest, |entry, reader, _| {
+        // Validate entry path BEFORE creating any directory or file
+        let rel = validate_archive_entry_path(entry.name())
+            .map_err(|e| sevenz_rust::Error::other(e.to_string()))?;
+        let target = canonical_dest.join(&rel);
+
+        if entry.is_directory() {
+            std::fs::create_dir_all(&target).map_err(sevenz_rust::Error::io)?;
+            let canon = target.canonicalize().map_err(sevenz_rust::Error::io)?;
+            if !canon.starts_with(&canonical_dest) {
+                return Err(sevenz_rust::Error::other("Zip-slip detected in 7z directory"));
+            }
+            return Ok(true);
+        }
+
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+            let canon_parent = parent.canonicalize().map_err(sevenz_rust::Error::io)?;
+            if !canon_parent.starts_with(&canonical_dest) {
+                return Err(sevenz_rust::Error::other("Zip-slip detected in 7z entry parent"));
+            }
+            let safe_target = canon_parent.join(
+                target
+                    .file_name()
+                    .ok_or_else(|| sevenz_rust::Error::other("Missing filename in 7z entry"))?,
+            );
+            sevenz_rust::default_entry_extract_fn(entry, reader, &safe_target)
+        } else {
+            Err(sevenz_rust::Error::other("Invalid 7z entry path without parent"))
+        }
+    })
+    .map_err(|e| anyhow::anyhow!("7-Zip extraction failed: {:?}", e))?;
+
+    Ok(())
+}
+
 pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)
         .with_context(|| format!("Cannot open zip: {}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("Failed to read zip archive")?;
 
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("Failed to create destination directory: {}", dest_dir.display()))?;
+    // FIX §5.3 — Zip-Slip prevention: resolve dest_dir to its canonical form once
+    let canonical_dest = dest_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot canonicalize destination: {}", dest_dir.display()))?;
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let raw_name = file.mangled_name();
-        let outpath = dest_dir.join(raw_name);
 
-        if file.name().ends_with('/') || file.name().ends_with('\\') {
+        // Skip symlinks to prevent symlink-based traversal
+        if file.is_symlink() {
+            continue;
+        }
+
+        // Validate entry path BEFORE creating any directory on disk
+        let raw_str = file.name().to_string();
+        if raw_str.trim().is_empty() || raw_str == "/" || raw_str == "\\" {
+            continue;
+        }
+        let trimmed = raw_str.trim_end_matches(['/', '\\']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rel_path = validate_archive_entry_path(trimmed)?;
+        let outpath = canonical_dest.join(&rel_path);
+
+        if file.is_dir() || raw_str.ends_with('/') || raw_str.ends_with('\\') {
+            std::fs::create_dir_all(&outpath)?;
+            let canon = outpath.canonicalize()?;
+            if !canon.starts_with(&canonical_dest) {
+                anyhow::bail!("Zip-slip detected: directory {:?} escapes destination", raw_str);
+            }
+        } else {
+            let parent = outpath
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Zip entry has no parent: {:?}", raw_str))?;
+            std::fs::create_dir_all(parent)?;
+            let canonical_parent = parent
+                .canonicalize()
+                .with_context(|| format!("Cannot canonicalize zip entry parent: {}", parent.display()))?;
+            if !canonical_parent.starts_with(&canonical_dest) {
+                anyhow::bail!("Zip-slip detected: entry {:?} escapes destination directory", raw_str);
+            }
+
+            let fname = outpath
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Zip entry has no file name: {:?}", raw_str))?;
+            let safe_outpath = canonical_parent.join(fname);
+            let mut outfile = std::fs::File::create(&safe_outpath)?;
+            std::io::copy(&mut file, &mut outfile)?;
+        }
+    }
+    Ok(())
+}
+
+fn unpack_tar_safe<R: std::io::Read>(mut tar: tar::Archive<R>, dest_dir: &Path) -> Result<()> {
+    let canonical_dest = dest_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot canonicalize destination: {}", dest_dir.display()))?;
+    tar.set_preserve_permissions(false);
+    for entry_res in tar.entries()? {
+        let mut entry = entry_res?;
+        let etype = entry.header().entry_type();
+        if etype.is_symlink() || etype.is_hard_link() {
+            continue;
+        }
+        let raw_path = entry.path()?.to_string_lossy().to_string();
+        let trimmed = raw_path.trim_end_matches(['/', '\\']);
+        if trimmed.is_empty() || trimmed == "." {
+            continue;
+        }
+        let rel = validate_archive_entry_path(trimmed)?;
+        let outpath = canonical_dest.join(&rel);
+        if etype.is_dir() {
             std::fs::create_dir_all(&outpath)?;
         } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    std::fs::create_dir_all(p)?;
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+                let canon_parent = parent.canonicalize()?;
+                if !canon_parent.starts_with(&canonical_dest) {
+                    anyhow::bail!("Tar Zip-slip detected: {}", raw_path);
                 }
             }
-            let mut outfile = std::fs::File::create(&outpath)?;
-            std::io::copy(&mut file, &mut outfile)?;
+            entry.unpack_in(&canonical_dest)?;
         }
     }
     Ok(())
@@ -163,17 +309,15 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let gz = flate2::read::GzDecoder::new(file);
-    let mut tar = tar::Archive::new(gz);
-    tar.unpack(dest_dir).context("Failed to extract tar.gz")?;
-    Ok(())
+    let tar = tar::Archive::new(gz);
+    unpack_tar_safe(tar, dest_dir).context("Failed to extract tar.gz")
 }
 
 fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let xz = xz2::read::XzDecoder::new(file);
-    let mut tar = tar::Archive::new(xz);
-    tar.unpack(dest_dir).context("Failed to extract tar.xz")?;
-    Ok(())
+    let tar = tar::Archive::new(xz);
+    unpack_tar_safe(tar, dest_dir).context("Failed to extract tar.xz")
 }
 
 /// Recursively looks for an executable with `expected_name` in `base_dir` up to 3 levels deep

@@ -123,6 +123,8 @@ fn make_default_config(install_dir: &Path) -> AppConfig {
         install_dir: install_dir.to_path_buf(),
         deadlock_game_dir: deadlock_dir,
         tools: default_tools(),
+        ui_language: Some("ru".into()),
+        ui_scale: Some(100),
     };
     update_installed_flags(&mut config);
     config

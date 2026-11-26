@@ -5,10 +5,14 @@
   import Button from './Button.svelte';
   import Badge from './Badge.svelte';
   import ProgressBar from './ProgressBar.svelte';
+  import AudioPreviewPlayer from './AudioPreviewPlayer.svelte';
+  import { DEADLOCK_HEROES, isGlobalCategory } from '$lib/constants/heroes';
+  import { upsertDownload } from '$lib/stores/downloads';
+  import { t } from '$lib/i18n';
 
   let {
     modId = null,
-    itemType = 'Mod',
+    itemType = 'Mod',   // FIX §2.3: always pass real item_type from feed
     isOpen = false,
     onClose = undefined,
     onInstalled = undefined,
@@ -18,7 +22,10 @@
   let error = $state('');
   let mod = $state(null);
   let activeScreenshot = $state(0);
-  let selectedFileIndex = $state(0);
+  let screenshotZoomed = $state(false);
+
+  // FIX §2.7 — Multi-VPK selection with checkboxes instead of radio buttons
+  let selectedFiles = $state(new Set());
 
   let installState = $state('idle'); // 'idle' | 'downloading' | 'extracting' | 'done' | 'error'
   let installProgress = $state(0);
@@ -27,25 +34,38 @@
   let installError = $state('');
 
   let unlistenProgress = null;
-  let detectedHero = $state('Abrams');
 
-  const DEADLOCK_HEROES = [
-    'Abrams', 'Bebop', 'Calico', 'Dynamo', 'Grey Talon', 'Haze', 'Holliday', 'Infernus',
-    'Ivy', 'Kelvin', 'Lady Geist', 'Lash', 'McGinnis', 'Mirage', 'Mo & Krill', 'Paradox',
-    'Pocket', 'Rat King', 'Seven', 'Shiv', 'Vindicta', 'Viscous', 'Warden', 'Wraith', 'Wrecker', 'Yamato'
-  ];
+  // FIX §2.5 — Hero is optional for global mods
+  let detectedHero = $state(null);
+  let isGlobal = $state(false);
 
+  const HERO_OPTIONS = ['', ...DEADLOCK_HEROES.map(h => h.name)];
+
+  // FIX §2.5 — Auto-detect hero; return null for global category mods; whole-word match prevents false positives like "minimap" -> "Mina"
   function autoDetectHero(modObj) {
-    if (!modObj) return 'Abrams';
-    const text = `${modObj.name} ${modObj.category || ''}`.toLowerCase();
-    for (const h of DEADLOCK_HEROES) {
-      if (text.includes(h.toLowerCase())) return h;
+    if (!modObj) return null;
+    const raw = `${modObj.name} ${modObj.category || ''}`.toLowerCase();
+    const clean = ` ${raw.replace(/[^a-z0-9&]+/g, ' ').trim()} `;
+
+    // If the mod category is UI/Sound/HUD/Map — it's global, no hero needed
+    if (isGlobalCategory(modObj.category || '')) {
+      isGlobal = true;
+      return null;
     }
-    if (text.includes('geist')) return 'Lady Geist';
-    if (text.includes('talon')) return 'Grey Talon';
-    if (text.includes('mokrill') || text.includes('mo & krill') || text.includes('mo and krill')) return 'Mo & Krill';
-    if (text.includes('ratking') || text.includes('rat king')) return 'Rat King';
-    return 'Abrams';
+    isGlobal = false;
+
+    for (const h of DEADLOCK_HEROES) {
+      if (clean.includes(` ${h.name.toLowerCase()} `)) return h.name;
+    }
+    // Alias checks (whole words)
+    if (clean.includes(' geist ') || clean.includes(' ladygeist ')) return 'Lady Geist';
+    if (clean.includes(' talon ') || clean.includes(' greytalon ')) return 'Grey Talon';
+    if (clean.includes(' mokrill ') || clean.includes(' mo & krill ') || clean.includes(' mo and krill ')) return 'Mo & Krill';
+    if (clean.includes(' ratking ') || clean.includes(' rat king ')) return 'Rat King';
+    if (clean.includes(' doorman ')) return 'The Doorman';
+
+    // FIX §2.5 — Do NOT default to 'Abrams'; return null = no hero
+    return null;
   }
 
   $effect(() => {
@@ -61,12 +81,14 @@
     error = '';
     mod = null;
     activeScreenshot = 0;
-    selectedFileIndex = 0;
+    selectedFiles = new Set();
     installState = 'idle';
     installProgress = 0;
     installMsg = '';
     installSpeed = 0;
     installError = '';
+    detectedHero = null;
+    isGlobal = false;
   }
 
   onMount(async () => {
@@ -94,8 +116,9 @@
     loading = true;
     error = '';
     try {
+      // FIX §2.3 — Pass the real item_type, not hardcoded "Mod"
       mod = await invoke('fetch_gamebanana_mod_detail', { modId: id, itemType: type });
-      selectedFileIndex = 0;
+      selectedFiles = new Set([0]); // default-select first file
       activeScreenshot = 0;
       detectedHero = autoDetectHero(mod);
     } catch (e) {
@@ -105,35 +128,70 @@
     }
   }
 
+  // FIX §2.7 — Install ALL selected files sequentially
   async function startInstall() {
-    if (!mod || !mod.files || !mod.files[selectedFileIndex]) return;
-    const file = mod.files[selectedFileIndex];
+    if (!mod || !mod.files || selectedFiles.size === 0) return;
 
+    const indices = [...selectedFiles].sort();
     installState = 'downloading';
     installProgress = 2;
-    installMsg = 'Connecting to download server…';
+    installMsg = `Installing ${indices.length} file(s)…`;
     installError = '';
 
     try {
-      await invoke('install_gamebanana_mod', {
-        modId: mod.id,
-        downloadUrl: file.download_url,
-        filename: file.filename,
-        heroName: detectedHero || null,
-        modTitle: mod.name || null,
-        thumbnailUrl: mod.screenshots?.[0] || null,
-        author: mod.submitter_name || null,
-        description: mod.description || null,
-      });
+      for (const idx of indices) {
+        const file = mod.files[idx];
+        if (!file) continue;
+        upsertDownload({
+          mod_id: mod.id,
+          filename: file.filename,
+          mod_name: mod.name,
+          hero_name: detectedHero || null,
+          thumbnail_url: mod.screenshots?.[0] || undefined,
+          status: 'downloading',
+          progress: 0,
+          message: 'Queued…',
+          speed_mbps: 0,
+        });
+        await invoke('install_gamebanana_mod', {
+          modId: mod.id,
+          downloadUrl: file.download_url,
+          filename: file.filename,
+          heroName: detectedHero || null,  // FIX §2.5: null = global mod
+          modTitle: mod.name || null,
+          thumbnailUrl: mod.screenshots?.[0] || null,
+          author: mod.submitter_name || null,
+          description: mod.description || null,
+          profileUrl: mod.profile_url || null, // FIX §2.3
+        });
+      }
       installState = 'done';
       installProgress = 100;
-      installMsg = `Installed ${file.filename} into citadel/addons!`;
+      installMsg = `${indices.length} file(s) installed into citadel/addons!`;
       onInstalled?.();
     } catch (err) {
       installState = 'error';
       installError = String(err);
       installMsg = `Installation failed: ${err}`;
     }
+  }
+
+  function toggleFile(idx) {
+    const next = new Set(selectedFiles);
+    if (next.has(idx)) {
+      next.delete(idx);
+    } else {
+      next.add(idx);
+    }
+    selectedFiles = next;
+  }
+
+  function selectAll() {
+    selectedFiles = new Set(mod.files.map((_, i) => i));
+  }
+
+  function deselectAll() {
+    selectedFiles = new Set();
   }
 
   function handleKeydown(e) {
@@ -151,35 +209,22 @@
   }
 
   async function launchGame() {
-    try {
-      await invoke('launch_game');
-    } catch (e) {
-      console.error(e);
-    }
+    try { await invoke('launch_game'); } catch (e) { console.error(e); }
   }
 
   async function openAddonsFolder() {
-    try {
-      await invoke('open_game_addons_folder');
-    } catch (e) {
-      console.error(e);
-    }
+    try { await invoke('open_game_addons_folder'); } catch (e) { console.error(e); }
   }
 
   function formatDate(ts) {
     if (!ts || ts === 0) return 'N/A';
     try {
       const d = new Date(Number(ts) * 1000);
-      return d.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return 'N/A';
-    }
+      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    } catch { return 'N/A'; }
   }
 
+  // FIX §2.3 — Always use the real profile_url from GameBanana, never reconstruct it
   async function openExternalUrl(url) {
     if (!url) return;
     try {
@@ -188,6 +233,18 @@
       window.open(url, '_blank');
     }
   }
+
+  // Audio preview: detect if mod is Sound-type
+  const isAudioMod = $derived(
+    mod && (
+      mod.item_type === 'Sound' ||
+      (mod.category || '').toLowerCase().includes('sound') ||
+      (mod.category || '').toLowerCase().includes('music') ||
+      (mod.category || '').toLowerCase().includes('audio')
+    )
+  );
+
+  const selectedCount = $derived(selectedFiles.size);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -201,7 +258,7 @@
     }}
   >
     <div
-      class="max-w-4xl w-full max-h-[90vh] bg-[#141822] border border-[#2b374a] rounded-[6px] shadow-2xl flex flex-col overflow-hidden text-[#f1f5f9]"
+      class="max-w-6xl w-[94vw] max-h-[92vh] bg-[#141822] border border-[#2b374a] rounded-[6px] shadow-2xl flex flex-col overflow-hidden text-[#f1f5f9]"
       role="dialog"
       aria-modal="true"
       tabindex="-1"
@@ -281,11 +338,12 @@
                 </span>
                 <button
                   type="button"
+                  disabled={!mod.profile_url}
                   onclick={() => openExternalUrl(mod.profile_url)}
                   style="color: var(--accent-light);"
-                  class="hover:underline flex items-center gap-1 font-sans cursor-pointer bg-transparent border-none p-0"
+                  class="hover:underline disabled:opacity-40 flex items-center gap-1 font-sans cursor-pointer bg-transparent border-none p-0"
                 >
-                  <span>GameBanana</span> ↗
+                  <span>{t('mods.open_page')}</span> ↗
                 </button>
               </div>
             </div>
@@ -322,15 +380,22 @@
             </div>
           </div>
 
-          <!-- Screenshots Gallery / Carousel -->
+          <!-- Screenshots Gallery / Carousel (h-[430px] + click zoom §4.3.1) -->
           {#if mod.screenshots && mod.screenshots.length > 0}
             <div class="space-y-2">
-              <div class="relative w-full h-[320px] bg-[#0c0e13] border border-[#232c3c] rounded-[5px] overflow-hidden flex items-center justify-center">
-                <img
-                  src={mod.screenshots[activeScreenshot]}
-                  alt="{mod.name} preview {activeScreenshot + 1}"
-                  class="max-w-full max-h-full object-contain select-none"
-                />
+              <div class="relative w-full h-[430px] bg-[#0c0e13] border border-[#232c3c] rounded-[5px] overflow-hidden flex items-center justify-center">
+                <button
+                  type="button"
+                  onclick={() => (screenshotZoomed = !screenshotZoomed)}
+                  class="w-full h-full flex items-center justify-center cursor-zoom-in bg-transparent border-none p-0 overflow-auto"
+                  title={screenshotZoomed ? 'Click to reset zoom' : 'Click to zoom'}
+                >
+                  <img
+                    src={mod.screenshots[activeScreenshot]}
+                    alt="{mod.name} preview {activeScreenshot + 1}"
+                    class="{screenshotZoomed ? 'scale-150 cursor-zoom-out' : 'max-w-full max-h-full object-contain'} transition-transform duration-200 select-none"
+                  />
+                </button>
 
                 {#if mod.screenshots.length > 1}
                   <button
@@ -393,35 +458,41 @@
             </div>
           {/if}
 
-          <!-- File Selection & Installation Box -->
+          <!-- File Selection & Installation Box — FIX §2.7 Multi-VPK checkboxes -->
           <div class="p-4 bg-[#181d29] border border-[#2b374a] rounded-[5px] space-y-3.5">
             <div class="flex items-center justify-between">
               <div>
                 <div class="text-xs font-semibold text-[#f1f5f9]">Available Files</div>
                 <div class="text-[11px] text-[#828fa3]">
-                  Choose which file to install directly into Deadlock's <code style="color: var(--accent-light);" class="font-mono">game/citadel/addons/</code>
+                  Select one or more files to install into <code style="color: var(--accent-light);" class="font-mono">game/citadel/addons/</code>
                 </div>
               </div>
-              <Badge variant="packer" text="{mod.files.length} file{mod.files.length === 1 ? '' : 's'}" />
+              <div class="flex items-center gap-2">
+                <Badge variant="packer" text="{mod.files.length} file{mod.files.length === 1 ? '' : 's'}" />
+                {#if mod.files.length > 1}
+                  <button onclick={selectAll} class="text-xs text-blue-400 hover:text-blue-300 border border-blue-700 rounded px-2 py-0.5 transition cursor-pointer">{t('mods.select_all')}</button>
+                  <button onclick={deselectAll} class="text-xs text-gray-400 hover:text-gray-300 border border-gray-700 rounded px-2 py-0.5 transition cursor-pointer">{t('mods.deselect_all')}</button>
+                {/if}
+              </div>
             </div>
 
-            <!-- Files list -->
+            <!-- Files list — CHECKBOXES instead of radio (FIX §2.7) -->
             {#if mod.files && mod.files.length > 0}
               <div class="space-y-2">
                 {#each mod.files as file, fIdx}
                   <label
-                    style={selectedFileIndex === fIdx ? 'border-color: var(--accent-primary);' : undefined}
+                    style={selectedFiles.has(fIdx) ? 'border-color: var(--accent-primary);' : undefined}
                     class="flex items-center justify-between p-3 rounded-[5px] border transition cursor-pointer select-none
-                      {selectedFileIndex === fIdx
+                      {selectedFiles.has(fIdx)
                         ? 'bg-[#1b2536] text-[#f1f5f9]'
                         : 'bg-[#131720] border-[#252f40] hover:border-[#384863] text-[#94a3b8]'}"
                   >
                     <div class="flex items-center gap-3 min-w-0 pr-3">
+                      <!-- FIX §2.7: checkbox not radio -->
                       <input
-                        type="radio"
-                        name="mod_file_choice"
-                        checked={selectedFileIndex === fIdx}
-                        onchange={() => selectedFileIndex = fIdx}
+                        type="checkbox"
+                        checked={selectedFiles.has(fIdx)}
+                        onchange={() => toggleFile(fIdx)}
                         style="accent-color: var(--accent-primary);"
                         class="cursor-pointer"
                       />
@@ -454,18 +525,34 @@
               </div>
             {/if}
 
-            <!-- Target Hero Assignment -->
+            <!-- Audio Preview for sound mods (FIX §4.3.5) -->
+            {#if isAudioMod && mod.files.length > 0}
+              {@const firstAudio = mod.files.find(f => f.filename.match(/\.(mp3|wav|ogg)$/i))}
+              {#if firstAudio}
+                <AudioPreviewPlayer src={firstAudio.download_url} label="Preview audio" />
+              {/if}
+            {/if}
+
+            <!-- FIX §2.5 — Hero Assignment: optional, first option = Global -->
             <div class="p-3 bg-[#131720] border border-[#252f40] rounded-[5px] flex items-center justify-between gap-3">
               <div>
                 <div class="text-xs font-semibold text-[#f1f5f9]">Hero Assignment</div>
-                <div class="text-[10px] text-[#828fa3]">This VPK will be linked to this hero and show in Characters loadout</div>
+                <div class="text-[10px] text-[#828fa3]">
+                  {#if isGlobal}
+                    <span class="text-yellow-400">🌐 Global mod — no hero required</span>
+                  {:else}
+                    Link this VPK to a hero in the Characters loadout
+                  {/if}
+                </div>
               </div>
               <select
                 bind:value={detectedHero}
                 class="h-8 px-2.5 bg-[#1b222f] text-xs text-[#f1f5f9] rounded border border-[#2d3a4e] focus:border-[var(--accent-primary)] cursor-pointer"
               >
+                <!-- FIX §2.5: first option = no hero -->
+                <option value={null}>{t('mods.hero_global')}</option>
                 {#each DEADLOCK_HEROES as h}
-                  <option value={h}>{h}</option>
+                  <option value={h.name}>{h.name}</option>
                 {/each}
               </select>
             </div>
@@ -512,16 +599,16 @@
             {:else}
               <div class="pt-2 flex items-center justify-between gap-3">
                 <div class="text-[11px] text-[#828fa3]">
-                  Selected: <span class="text-[#f1f5f9] font-medium">{mod.files[selectedFileIndex]?.filename || 'None'}</span> ({mod.files[selectedFileIndex]?.filesize_formatted || '0 B'})
+                  {selectedCount} file(s) selected
                 </div>
 
                 <Button
                   variant="filled"
                   size="md"
-                  disabled={!mod.files || mod.files.length === 0}
+                  disabled={selectedCount === 0 || !mod.files || mod.files.length === 0}
                   onclick={startInstall}
                 >
-                  Install to Deadlock
+                  {t('mods.install_selected')} ({selectedCount})
                 </Button>
               </div>
             {/if}

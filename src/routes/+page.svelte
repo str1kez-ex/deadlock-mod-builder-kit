@@ -16,44 +16,20 @@
   import VpkInspector from '$lib/components/VpkInspector.svelte';
   import CreateModWizard from '$lib/components/CreateModWizard.svelte';
   import VpkMergeEngine from '$lib/components/VpkMergeEngine.svelte';
+  import HeroIcon from '$lib/components/HeroIcon.svelte';
+  import DownloadItemCard from '$lib/components/DownloadItemCard.svelte';
 
-  const DEADLOCK_HEROES = [
-    'Abrams', 'Bebop', 'Calico', 'Dynamo', 'Grey Talon', 'Haze', 'Holliday', 'Infernus',
-    'Ivy', 'Kelvin', 'Lady Geist', 'Lash', 'McGinnis', 'Mirage', 'Mo & Krill', 'Paradox',
-    'Pocket', 'Rat King', 'Seven', 'Shiv', 'Vindicta', 'Viscous', 'Warden', 'Wraith', 'Wrecker', 'Yamato'
-  ];
+  // v1.5 — Import from centralized constants (FIX §2.6, §2.5)
+  import { DEADLOCK_HEROES, HERO_NAMES, HERO_ICONS, getHeroIcon } from '$lib/constants/heroes';
+  // v1.5 — Stores
+  import { initUiScale, setUiScale, initLang, setLang, getLang, getUiScale, SCALE_OPTIONS } from '$lib/stores/settings';
+  import { getDownloads, getActiveDownloads, getCompletedDownloads, clearCompleted, setupDownloadListener } from '$lib/stores/downloads';
+  import { getPlayer, loadPlayer, setManualAccountId } from '$lib/stores/player';
+  import { t } from '$lib/i18n';
 
-  const HERO_ICONS = {
-    'Abrams': '/heroes/bull_sm_psd.png',
-    'Bebop': '/heroes/bebop_sm_psd.png',
-    'Calico': '/heroes/drifter_sm_psd_d94dcb01.png',
-    'Dynamo': '/heroes/nano_sm_psd.png',
-    'Grey Talon': '/heroes/archer_sm_psd.png',
-    'Haze': '/heroes/haze_card_psd.png',
-    'Holliday': '/heroes/astro_sm_psd.png',
-    'Infernus': '/heroes/inferno_sm_psd.png',
-    'Ivy': '/heroes/familiar_sm_psd.png',
-    'Kelvin': '/heroes/kelvin_sm_psd.png',
-    'Lady Geist': '/heroes/vampirebat_sm_psd.png',
-    'Lash': '/heroes/lash_sm_psd.png',
-    'McGinnis': '/heroes/engineer_sm_psd.png',
-    'Mirage': '/heroes/mirage_sm_psd.png',
-    'Mo & Krill': '/heroes/digger_sm_psd.png',
-    'Paradox': '/heroes/chrono_sm_psd.png',
-    'Pocket': '/heroes/deadpack_sm_psd.png',
-    'Rat King': '/heroes/ratking_sm_psd.png',
-    'Seven': '/heroes/gigawatt_sm_psd.png',
-    'Shiv': '/heroes/shiv_sm_psd.png',
-    'Vindicta': '/heroes/hornet_sm_png.png',
-    'Viscous': '/heroes/viscous_sm_psd.png',
-    'Warden': '/heroes/warden_sm_psd.png',
-    'Wraith': '/heroes/wraith_sm_psd.png',
-    'Wrecker': '/heroes/necro_sm_psd.png',
-    'Yamato': '/heroes/yamato_sm_psd.png',
-  };
-
-  function getHeroIcon(heroName) {
-    return HERO_ICONS[heroName] || '';
+  // Hero icon helper (using centralized map, FIX §2.6)
+  function getHeroIconLegacy(heroName) {
+    return getHeroIcon(heroName);
   }
 
   const THEMES = [
@@ -65,17 +41,24 @@
   ];
 
   // ── Application State ──────────────────────────────────────────────────────
-  let activeTab = $state('mods'); // 'mods' | 'characters' | 'installed' | 'tracker_meta' | 'tracker_builds' | 'create_mod' | 'vpk_merge' | 'dashboard' | 'logs' | 'settings'
+  let activeTab = $state('home'); // 'home' | 'mods' | 'characters' | 'installed' | 'downloads' | 'tracker_meta' | 'profile' | 'create_mod' | 'vpk_merge' | 'dashboard' | 'logs' | 'settings'
   let currentTheme = $state('green');
   let deadlockBuildId = $state('26770241');
   let config = $state(null);
   let tools = $state([]);
   let addons = $state([]);
   let logs = $state([]);
+  let gameLogs = $state([]);
+  let logsFilter = $state('all'); // 'all' | 'info' | 'error' | 'game'
   let progress = $state({}); // tool_id -> InstallProgress
+
+  // FIX §2.1 — Vanilla mode state
+  let vanillaActive = $state(false);
+  let vanillaIsolatedCount = $state(0);
 
   // Mod Details & Launch Modals
   let selectedModId = $state(null);
+  let selectedModItemType = $state('Mod'); // FIX §2.3: carry real item_type
   let isModModalOpen = $state(false);
   let isLaunchModalOpen = $state(false);
 
@@ -93,7 +76,7 @@
   let searchDebounceTimer = null;
   let activeCategory = $state('All');
   let selectedHeroFilter = $state('All');
-  let modsSort = $state('default'); // 'default' (popular), 'updated' (recently updated), 'new' (newest)
+  let modsSort = $state('default');
   let gbLatencyMs = $state(null);
   let isPinging = $state(false);
 
@@ -111,13 +94,21 @@
   let installedSearch = $state('');
   let installedStatus = $state('all');
 
-  // Tracker Meta & Builds State
+  // Tracker Meta State — FIX §2.4: reactive filtering
   let metaRoleFilter = $state('All');
   let metaSearchQuery = $state('');
   let selectedBuildHero = $state('Seven');
 
+  // v1.5 — UI settings
+  let uiScale = $state(100);
+  let uiLang = $state('ru');
+  let diskFreeBytes = $state(null);
+  let manualAccountInput = $state('');
+  let settingsCameraMsg = $state('');
+
   // Logs state
   let logsCopied = $state(false);
+  let logsSaved = $state(false);
 
   // Confirmation Modals
   let modal = $state(null);
@@ -125,7 +116,8 @@
 
   function appendLog(level, message) {
     const time = new Date().toLocaleTimeString();
-    logs = [{ time, level, message }, ...logs.slice(0, 300)];
+    logs = [{ time, level, message, source: 'app' }, ...logs.slice(0, 300)];
+    invoke('write_session_log', { level, message }).catch(() => {});
   }
 
   function applyTheme(themeId) {
@@ -154,11 +146,29 @@
     const savedTheme = localStorage.getItem('dmbk_app_theme') || 'green';
     applyTheme(savedTheme);
 
-    appendLog('info', 'System initialization: Deadlock Mod Build Kit v0.1.4');
+    // v1.5 — Restore UI scale and language
+    initUiScale();
+    initLang();
+    uiScale = getUiScale();
+    uiLang = getLang();
+
+    appendLog('info', 'System initialization: Deadlock Mod Build Kit v1.5');
     try {
       config = await invoke('get_config');
       tools = config.tools || [];
+      // Sync language and scale from config if not overridden in localStorage
+      if (!localStorage.getItem('dmbk_lang') && config.ui_language) {
+        initLang(config.ui_language);
+        uiLang = getLang();
+      }
+      if (!localStorage.getItem('dmbk_ui_scale') && config.ui_scale) {
+        initUiScale(config.ui_scale);
+        uiScale = getUiScale();
+      }
       appendLog('success', `Environment configuration loaded: ${tools.length} managed tools.`);
+
+      // Free disk space metric (§4.1.3)
+      loadDiskFreeSpace();
 
       // Detect Deadlock Build ID
       try {
@@ -187,6 +197,12 @@
           appendLog('error', `[${payload.tool_id}] ${payload.message}`);
         }
       });
+
+      // v1.5 — Setup download listener
+      await setupDownloadListener();
+
+      // Load player profile
+      loadPlayer();
 
       // Initial sync with GameBanana
       syncWithGameBanana();
@@ -345,8 +361,10 @@
     loadCommunityMods(1, searchQuery);
   }
 
-  function openModDetails(id) {
+  // FIX §2.3 — openModDetails must carry the real item_type from the feed record
+  function openModDetails(id, itemType = 'Mod') {
     selectedModId = id;
+    selectedModItemType = itemType;
     isModModalOpen = true;
   }
 
@@ -397,12 +415,105 @@
     }
   }
 
-  async function launchGameVanilla() {
-    appendLog('info', 'Executing Deadlock in Vanilla mode (addons disabled)…');
+  // v1.5 — UI Scale & Language
+  function changeUiScale(scale) {
+    uiScale = scale;
+    setUiScale(scale);
+  }
+
+  function changeUiLang(lang) {
+    uiLang = lang;
+    setLang(lang);
+  }
+
+  async function loadDiskFreeSpace() {
     try {
-      await invoke('launch_game_vanilla');
+      diskFreeBytes = await invoke('get_disk_free_space');
+    } catch {
+      diskFreeBytes = null;
+    }
+  }
+
+  function formatDiskBytes(bytes) {
+    if (bytes === null || bytes === undefined) return '—';
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return `${gb.toFixed(1)} GB`;
+    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  }
+
+  async function applyCameraFixFromSettings() {
+    settingsCameraMsg = '';
+    try {
+      const res = await invoke('fix_mods_camera');
+      settingsCameraMsg = res.message;
+      appendLog('success', res.message);
+    } catch (e) {
+      settingsCameraMsg = String(e);
+      appendLog('error', `Camera fix failed: ${e}`);
+    }
+  }
+
+  async function saveLogsToDisk() {
+    const combined = [
+      ...logs.map(l => ({ ...l, source: 'app' })),
+      ...(Array.isArray(gameLogs) ? gameLogs : []),
+    ];
+    if (!combined.length) return;
+    const text = combined
+      .map(l => `[${l.time}] [${(l.source === 'game' ? 'GAME' : l.level).toUpperCase()}] ${l.message}`)
+      .join('\n');
+    try {
+      const saved = await invoke('save_logs_dialog', { content: text });
+      if (saved) {
+        logsSaved = true;
+        setTimeout(() => { logsSaved = false; }, 2000);
+      }
+    } catch (e) {
+      appendLog('error', `Failed to save log file: ${e}`);
+    }
+  }
+
+  // FIX §2.1 — Vanilla launch with physical addon isolation
+  async function launchGameVanilla() {
+    appendLog('info', 'Launching Deadlock in Vanilla (Clean) mode — isolating mods…');
+    try {
+      const result = await invoke('launch_game_vanilla');
+      vanillaActive = true;
+      vanillaIsolatedCount = result.isolated_count;
+      appendLog('success', result.message);
     } catch (e) {
       appendLog('error', `Vanilla launch failed: ${e}`);
+    }
+  }
+
+  // FIX §2.1 — Restore addons after Vanilla
+  async function restoreVanillaAddons() {
+    try {
+      const count = await invoke('restore_vanilla_addons');
+      vanillaActive = false;
+      vanillaIsolatedCount = 0;
+      appendLog('success', `Vanilla mode ended. ${count} mod(s) restored.`);
+      loadAddons();
+    } catch (e) {
+      appendLog('error', `Failed to restore mods: ${e}`);
+    }
+  }
+
+  // v1.5 — Load game logs from Deadlock console
+  async function loadGameLogs() {
+    try {
+      const entries = await invoke('get_game_logs');
+      gameLogs = Array.isArray(entries) ? entries : [];
+      appendLog('info', `Loaded ${gameLogs.length} line(s) from Deadlock console log.`);
+    } catch (e) {
+      appendLog('error', `Failed to read game logs: ${e}`);
+    }
+  }
+
+  // v1.5 — Open logs folder
+  async function openLogsFolder() {
+    try { await invoke('open_logs_folder'); } catch (e) {
+      appendLog('error', `Cannot open logs folder: ${e}`);
     }
   }
 
@@ -527,84 +638,75 @@
       })
   );
 
-  // ── Meta Leaderboard Data ──────────────────────────────────────────────────
+  // ── Meta Leaderboard Data (v1.5 Full Roster 45 Heroes, FIX §2.4) ───────────
   const META_HEROES_EXPANDED = [
-    { rank: 1, name: 'Seven', tier: 'S+', winrate: '55.4%', pickrate: '31.2%', banrate: '22.4%', role: 'Spirit Hypercarry', gpm: '840', dpm: '2,420', counter: 'Vindicta', synergy: 'Dynamo' },
-    { rank: 2, name: 'Ivy', tier: 'S+', winrate: '54.8%', pickrate: '24.1%', banrate: '18.1%', role: 'Support / Airborne Buffer', gpm: '710', dpm: '1,890', counter: 'Haze', synergy: 'Seven' },
-    { rank: 3, name: 'Vindicta', tier: 'S', winrate: '53.9%', pickrate: '26.8%', banrate: '24.5%', role: 'Long Range Assassin', gpm: '820', dpm: '2,650', counter: 'Lash', synergy: 'Ivy' },
-    { rank: 4, name: 'Infernus', tier: 'A+', winrate: '53.4%', pickrate: '28.0%', banrate: '14.2%', role: 'DoT Brawler / Shredder', gpm: '790', dpm: '2,380', counter: 'Kelvin', synergy: 'Abrams' },
-    { rank: 5, name: 'Abrams', tier: 'A+', winrate: '52.9%', pickrate: '30.5%', banrate: '19.8%', role: 'Initiator / Melee Tank', gpm: '750', dpm: '1,980', counter: 'Seven', synergy: 'Infernus' },
-    { rank: 6, name: 'Haze', tier: 'A', winrate: '52.5%', pickrate: '34.2%', banrate: '28.0%', role: 'Stealth Bullet Carry', gpm: '860', dpm: '2,510', counter: 'Warden', synergy: 'Dynamo' },
-    { rank: 7, name: 'Pocket', tier: 'A', winrate: '52.1%', pickrate: '21.0%', banrate: '12.6%', role: 'Elusive Burst Mage', gpm: '780', dpm: '2,240', counter: 'Shiv', synergy: 'Ivy' },
-    { rank: 8, name: 'Dynamo', tier: 'A', winrate: '51.8%', pickrate: '18.9%', banrate: '15.4%', role: 'Teamfight Initiator / Support', gpm: '680', dpm: '1,620', counter: 'Vindicta', synergy: 'Seven' },
-    { rank: 9, name: 'Lady Geist', tier: 'B+', winrate: '51.2%', pickrate: '19.5%', banrate: '11.0%', role: 'Life Drain / Sustained Spirit', gpm: '770', dpm: '2,310', counter: 'Haze', synergy: 'Abrams' },
-    { rank: 10, name: 'Warden', tier: 'B+', winrate: '50.7%', pickrate: '23.4%', banrate: '8.5%', role: 'Lockdown / Crowd Control', gpm: '740', dpm: '1,920', counter: 'Pocket', synergy: 'Infernus' },
-    { rank: 11, name: 'Viscous', tier: 'B', winrate: '50.1%', pickrate: '17.2%', banrate: '6.2%', role: 'Goo Brawler / Frontline Utility', gpm: '710', dpm: '1,780', counter: 'Seven', synergy: 'Abrams' },
-    { rank: 12, name: 'Bebop', tier: 'B', winrate: '49.4%', pickrate: '27.6%', banrate: '21.0%', role: 'Hook Specialist / Laser Burst', gpm: '760', dpm: '2,150', counter: 'Pocket', synergy: 'Seven' },
-    { rank: 13, name: 'Shiv', tier: 'B', winrate: '48.9%', pickrate: '20.1%', banrate: '9.4%', role: 'Bleed Execute / Skirmisher', gpm: '780', dpm: '2,080', counter: 'Vindicta', synergy: 'Infernus' },
-    { rank: 14, name: 'Rat King', tier: 'A', winrate: '52.0%', pickrate: '15.8%', banrate: '8.9%', role: 'Summoner / Area Swarm', gpm: '810', dpm: '2,190', counter: 'Ivy', synergy: 'Abrams' },
+    { rank: 1,  name: 'Seven',         tier: 'S+', winrate: '55.4%', pickrate: '31.2%', banrate: '22.4%', role: 'Spirit Hypercarry',            gpm: '840', dpm: '2,420', counter: 'Vindicta',    synergy: 'Dynamo' },
+    { rank: 2,  name: 'Ivy',           tier: 'S+', winrate: '54.8%', pickrate: '24.1%', banrate: '18.1%', role: 'Support / Airborne Buffer',    gpm: '710', dpm: '1,890', counter: 'Haze',        synergy: 'Seven' },
+    { rank: 3,  name: 'Vindicta',      tier: 'S+', winrate: '54.2%', pickrate: '26.8%', banrate: '24.5%', role: 'Long Range Assassin Carry',    gpm: '820', dpm: '2,650', counter: 'Lash',        synergy: 'Ivy' },
+    { rank: 4,  name: 'Mina',          tier: 'S+', winrate: '54.0%', pickrate: '29.4%', banrate: '26.1%', role: 'Vampire Burst Mage / Carry',   gpm: '830', dpm: '2,490', counter: 'Dynamo',      synergy: 'Mo & Krill' },
+    { rank: 5,  name: 'Rat King',      tier: 'S',  winrate: '53.8%', pickrate: '18.8%', banrate: '12.9%', role: 'Summoner / Area Initiator',    gpm: '810', dpm: '2,290', counter: 'Ivy',         synergy: 'Abrams' },
+    { rank: 6,  name: 'Infernus',      tier: 'S',  winrate: '53.4%', pickrate: '28.0%', banrate: '14.2%', role: 'DoT Mage / Carry',             gpm: '790', dpm: '2,380', counter: 'Kelvin',      synergy: 'Abrams' },
+    { rank: 7,  name: 'Billy',         tier: 'S',  winrate: '53.2%', pickrate: '25.6%', banrate: '19.3%', role: 'Melee Brawler / Initiator',    gpm: '765', dpm: '2,120', counter: 'Vindicta',    synergy: 'Paige' },
+    { rank: 8,  name: 'Apollo',        tier: 'S',  winrate: '53.1%', pickrate: '22.4%', banrate: '15.0%', role: 'Mobile Carry',                 gpm: '835', dpm: '2,440', counter: 'Warden',      synergy: 'Rem' },
+    { rank: 9,  name: 'Abrams',        tier: 'A+', winrate: '52.9%', pickrate: '30.5%', banrate: '19.8%', role: 'Initiator / Melee Brawler',    gpm: '750', dpm: '1,980', counter: 'Seven',       synergy: 'Infernus' },
+    { rank: 10, name: 'Drifter',       tier: 'A+', winrate: '52.7%', pickrate: '23.8%', banrate: '21.5%', role: 'Stalker Assassin Carry',       gpm: '845', dpm: '2,460', counter: 'Warden',      synergy: 'The Doorman' },
+    { rank: 11, name: 'Haze',          tier: 'A+', winrate: '52.6%', pickrate: '34.2%', banrate: '28.0%', role: 'Stealth Bullet Carry',         gpm: '860', dpm: '2,510', counter: 'Warden',      synergy: 'Dynamo' },
+    { rank: 12, name: 'Celeste',       tier: 'A+', winrate: '52.4%', pickrate: '19.1%', banrate: '10.3%', role: 'Duelist Spirit Mage',          gpm: '795', dpm: '2,320', counter: 'Lash',        synergy: 'Dynamo' },
+    { rank: 13, name: 'The Doorman',   tier: 'A+', winrate: '52.2%', pickrate: '20.4%', banrate: '13.8%', role: 'Portal Utility Initiator',     gpm: '735', dpm: '1,940', counter: 'Infernus',    synergy: 'Dynamo' },
+    { rank: 14, name: 'Pocket',        tier: 'A+', winrate: '52.1%', pickrate: '21.0%', banrate: '12.6%', role: 'Elusive Burst Mage',           gpm: '780', dpm: '2,240', counter: 'Shiv',        synergy: 'Ivy' },
+    { rank: 15, name: 'Dynamo',        tier: 'A',  winrate: '51.9%', pickrate: '18.9%', banrate: '15.4%', role: 'Teamfight Initiator / Support', gpm: '680', dpm: '1,620', counter: 'Vindicta',   synergy: 'Seven' },
+    { rank: 16, name: 'Victor',        tier: 'A',  winrate: '51.8%', pickrate: '21.7%', banrate: '14.0%', role: 'Undying Tank Brawler',         gpm: '755', dpm: '2,030', counter: 'Vindicta',    synergy: 'Kelvin' },
+    { rank: 17, name: 'Solomon',       tier: 'A',  winrate: '51.8%', pickrate: '16.5%', banrate: '8.7%',  role: 'Ward & Sustain Support',       gpm: '705', dpm: '1,740', counter: 'Haze',        synergy: 'Seven' },
+    { rank: 18, name: 'Rem',           tier: 'A',  winrate: '51.6%', pickrate: '15.2%', banrate: '7.4%',  role: 'Arcane Tome Support',          gpm: '715', dpm: '1,820', counter: 'Calico',      synergy: 'Apollo' },
+    { rank: 19, name: 'Lash',          tier: 'A',  winrate: '51.5%', pickrate: '25.0%', banrate: '13.5%', role: 'Grapple Initiator / Brawler',  gpm: '765', dpm: '2,120', counter: 'Pocket',      synergy: 'Dynamo' },
+    { rank: 20, name: 'Silver',        tier: 'A',  winrate: '51.4%', pickrate: '17.8%', banrate: '9.1%',  role: 'Cybernetic Marksman Carry',    gpm: '825', dpm: '2,410', counter: 'Abrams',      synergy: 'Kelvin' },
+    { rank: 21, name: 'Paige',         tier: 'A',  winrate: '51.4%', pickrate: '19.6%', banrate: '11.2%', role: 'Conjuration Support',          gpm: '695', dpm: '1,760', counter: 'Haze',        synergy: 'Billy' },
+    { rank: 22, name: 'Venator',       tier: 'A',  winrate: '51.3%', pickrate: '14.9%', banrate: '6.8%',  role: 'Trap Initiator',               gpm: '745', dpm: '2,010', counter: 'Seven',       synergy: 'Ivy' },
+    { rank: 23, name: 'Lady Geist',    tier: 'B+', winrate: '51.2%', pickrate: '19.5%', banrate: '11.0%', role: 'Life Drain Spirit Mage',       gpm: '770', dpm: '2,310', counter: 'Haze',        synergy: 'Abrams' },
+    { rank: 24, name: 'Vyper',         tier: 'B+', winrate: '51.1%', pickrate: '22.1%', banrate: '12.4%', role: 'Sliding Venom Carry',          gpm: '815', dpm: '2,390', counter: 'Mo & Krill',  synergy: 'Viscous' },
+    { rank: 25, name: 'Violet',        tier: 'B+', winrate: '51.0%', pickrate: '16.0%', banrate: '7.9%',  role: 'Spectral Burst Mage',          gpm: '775', dpm: '2,280', counter: 'Warden',      synergy: 'Mo & Krill' },
+    { rank: 26, name: 'Graves',        tier: 'B+', winrate: '50.9%', pickrate: '18.2%', banrate: '10.2%', role: 'Ferocious Melee Brawler',      gpm: '755', dpm: '2,040', counter: 'Vindicta',    synergy: 'Nurse Harrow' },
+    { rank: 27, name: 'Warden',        tier: 'B+', winrate: '50.7%', pickrate: '23.4%', banrate: '8.5%',  role: 'Lockdown / Brawler',           gpm: '740', dpm: '1,920', counter: 'Pocket',      synergy: 'Infernus' },
+    { rank: 28, name: 'Kelvin',        tier: 'B+', winrate: '50.6%', pickrate: '17.4%', banrate: '9.8%',  role: 'Frost Dome Support',           gpm: '700', dpm: '1,790', counter: 'Lash',        synergy: 'Haze' },
+    { rank: 29, name: 'Nurse Harrow',  tier: 'B+', winrate: '50.5%', pickrate: '14.1%', banrate: '5.6%',  role: 'Combat Medic Support',         gpm: '690', dpm: '1,650', counter: 'Vindicta',    synergy: 'Graves' },
+    { rank: 30, name: 'Calico',        tier: 'B+', winrate: '50.4%', pickrate: '15.9%', banrate: '6.4%',  role: 'Agile Assassin Carry',         gpm: '800', dpm: '2,260', counter: 'Mo & Krill',  synergy: 'Dynamo' },
+    { rank: 31, name: 'Baba',          tier: 'B',  winrate: '50.3%', pickrate: '12.8%', banrate: '4.9%',  role: 'Hex Utility Support',          gpm: '695', dpm: '1,710', counter: 'Haze',        synergy: 'Seven' },
+    { rank: 32, name: 'Deadman Danny', tier: 'B',  winrate: '50.2%', pickrate: '13.5%', banrate: '5.1%',  role: 'Frontline Brawler',            gpm: '735', dpm: '1,880', counter: 'Seven',       synergy: 'Ivy' },
+    { rank: 33, name: 'Viscous',       tier: 'B',  winrate: '50.1%', pickrate: '17.2%', banrate: '6.2%',  role: 'Goo Brawler / Utility',        gpm: '710', dpm: '1,780', counter: 'Seven',       synergy: 'Abrams' },
+    { rank: 34, name: 'Paradox',       tier: 'B',  winrate: '49.9%', pickrate: '16.4%', banrate: '7.1%',  role: 'Time-Swap Mage / Initiator',   gpm: '745', dpm: '1,990', counter: 'Abrams',      synergy: 'Bebop' },
+    { rank: 35, name: 'Mirage',        tier: 'B',  winrate: '49.8%', pickrate: '18.0%', banrate: '8.3%',  role: 'Djinn Mark Mage / Carry',      gpm: '785', dpm: '2,180', counter: 'Haze',        synergy: 'Kelvin' },
+    { rank: 36, name: 'McGinnis',      tier: 'B',  winrate: '49.7%', pickrate: '20.4%', banrate: '6.9%',  role: 'Turret Siege Brawler',         gpm: '775', dpm: '2,140', counter: 'Vindicta',    synergy: 'Ivy' },
+    { rank: 37, name: 'Mo & Krill',    tier: 'B',  winrate: '49.6%', pickrate: '16.8%', banrate: '7.7%',  role: 'Burrow Brawler / Lockdown',    gpm: '720', dpm: '1,760', counter: 'Seven',       synergy: 'Vindicta' },
+    { rank: 38, name: 'Wraith',        tier: 'B',  winrate: '49.5%', pickrate: '22.7%', banrate: '9.2%',  role: 'Card Trick Bullet Carry',      gpm: '815', dpm: '2,340', counter: 'Warden',      synergy: 'Dynamo' },
+    { rank: 39, name: 'Bebop',         tier: 'B',  winrate: '49.4%', pickrate: '27.6%', banrate: '21.0%', role: 'Hook Initiator / Laser',       gpm: '760', dpm: '2,150', counter: 'Pocket',      synergy: 'Seven' },
+    { rank: 40, name: 'Yamato',        tier: 'B',  winrate: '49.2%', pickrate: '19.3%', banrate: '10.4%', role: 'Blade Skirmisher Initiator',   gpm: '770', dpm: '2,110', counter: 'Warden',      synergy: 'Ivy' },
+    { rank: 41, name: 'Holliday',      tier: 'C+', winrate: '49.1%', pickrate: '14.5%', banrate: '4.5%',  role: 'Lasso Gunslinger Carry',       gpm: '760', dpm: '2,090', counter: 'Abrams',      synergy: 'Dynamo' },
+    { rank: 42, name: 'Shiv',          tier: 'C+', winrate: '48.9%', pickrate: '20.1%', banrate: '9.4%',  role: 'Bleed Brawler',                gpm: '780', dpm: '2,080', counter: 'Vindicta',    synergy: 'Infernus' },
+    { rank: 43, name: 'Grey Talon',    tier: 'C+', winrate: '48.6%', pickrate: '16.2%', banrate: '5.8%',  role: 'Charged Bow Carry',            gpm: '755', dpm: '2,210', counter: 'Lash',        synergy: 'Kelvin' },
+    { rank: 44, name: 'Wrecker',       tier: 'C',  winrate: '48.2%', pickrate: '11.4%', banrate: '3.2%',  role: 'Heavy Siege Initiator',        gpm: '715', dpm: '1,840', counter: 'Seven',       synergy: 'McGinnis' },
+    { rank: 45, name: 'Sinclair',      tier: 'C',  winrate: '47.9%', pickrate: '10.6%', banrate: '4.1%',  role: 'Illusionist Mage',             gpm: '740', dpm: '1,960', counter: 'Haze',        synergy: 'Paradox' },
   ];
 
-  // ── Hero Build Guides Data ─────────────────────────────────────────────────
-  const HERO_BUILDS = {
-    'Seven': {
-      title: 'Storm Surge & Hyper Spirit Scaling',
-      winrate: '58.4%',
-      matches: '24,800',
-      skillPriority: 'Max 3 (Power Surge) → Max 1 (Lightning Ball) → Max 4 (Storm Cloud) → Max 2 (Static Charge)',
-      playstyle: 'Farm jungle aggressively during minute 3-8 using Lightning Ball. Transition to mid-game lane sieging by anchoring Storm Cloud atop high ground with Superior Reach.',
-      earlyItems: ['Restorative Shot (500)', 'Mystic Reach (500)', 'Extra Spirit (500)', 'Sprint Boots (500)'],
-      midItems: ['Quicksilver Reload (1,250)', 'Enduring Speed (1,250)', 'Duration Extender (1,250)', 'Bullet Lifesteal (1,250)'],
-      lateItems: ['Superior Cooldown (3,000)', 'Superior Stamina (3,000)', 'Surge of Power (3,000)', 'Torment Pulse (3,000)'],
-      luxuryItems: ['Boundless Spirit (6,200)', 'Curse (6,200)', 'Diviner\'s Kevlar (6,200)'],
-    },
-    'Abrams': {
-      title: 'Heavy Melee Siphon Initiator',
-      winrate: '56.8%',
-      matches: '21,400',
-      skillPriority: 'Max 1 (Siphon Life) → Max 2 (Shoulder Charge) → Max 4 (Seismic Impact) → Max 3 (Infernal Resilience)',
-      playstyle: 'Close gaps with Shoulder Charge into point-blank Heavy Melee stun. Use Siphon Life to outsustain dual-lane trades and initiate teamfights with Seismic Impact.',
-      earlyItems: ['Melee Lifesteal (500)', 'Close Quarters (500)', 'Extra Health (500)', 'Kinetic Dash (500)'],
-      midItems: ['Melee Charge (1,250)', 'Restorative Locket (1,250)', 'Combat Barrier (1,250)', 'Berserker (1,250)'],
-      lateItems: ['Torment Pulse (3,000)', 'Superior Stamina (3,000)', 'Warp Stone (3,000)', 'Debuff Remover (3,000)'],
-      luxuryItems: ['Colossus (6,200)', 'Phantom Strike (6,200)', 'Leech (6,200)'],
-    },
-    'Infernus': {
-      title: 'Afterburn DoT & Toxic Shredder',
-      winrate: '57.1%',
-      matches: '19,600',
-      skillPriority: 'Max 3 (Afterburn) → Max 1 (Catalyst) → Max 2 (Flame Dash) → Max 4 (Concussive Combustion)',
-      playstyle: 'Stack Afterburn triggers on enemy tanks with rapid fire rate. Use Flame Dash for escape and repositioning, activating Concussive Combustion in clustered corridors.',
-      earlyItems: ['Basic Magazine (500)', 'Toxic Bullets (1,250)', 'Extra Stamina (500)', 'Mystic Burst (500)'],
-      midItems: ['Kinetic Dash (1,250)', 'Enduring Speed (1,250)', 'Slowing Bullets (1,250)', 'Duration Extender (1,250)'],
-      lateItems: ['Titanic Magazine (3,000)', 'Superior Stamina (3,000)', 'Pristine Emblem (3,000)', 'Spiritual Overflow (3,000)'],
-      luxuryItems: ['Ricochet (6,200)', 'Silencer (6,200)', 'Siphon Bullets (6,200)'],
-    },
-    'Ivy': {
-      title: 'Airborne Kudzu Bomber & Carry Buffer',
-      winrate: '56.2%',
-      matches: '16,200',
-      skillPriority: 'Max 1 (Kudzu Bomb) → Max 2 (Watcher\'s Covenant) → Max 4 (Air Drop) → Max 3 (Stone Form)',
-      playstyle: 'Tether to your primary hypercarry with Watcher\'s Covenant to grant immense fire rate and bullet lifesteal. Drop airborne initiators into the pit with Air Drop.',
-      earlyItems: ['Extra Stamina (500)', 'Mystic Reach (500)', 'Healing Rite (500)', 'High-Velocity Mag (500)'],
-      midItems: ['Quicksilver Reload (1,250)', 'Restorative Locket (1,250)', 'Enduring Speed (1,250)', 'Rescue Beam (1,250)'],
-      lateItems: ['Superior Cooldown (3,000)', 'Superior Duration (3,000)', 'Heroic Aura (3,000)', 'Debuff Remover (3,000)'],
-      luxuryItems: ['Curse (6,200)', 'Diviner\'s Kevlar (6,200)', 'Magic Carpet (6,200)'],
-    },
-    'Vindicta': {
-      title: 'Crow Familiar & Longshot Sniper',
-      winrate: '55.9%',
-      matches: '18,900',
-      skillPriority: 'Max 4 (Assassinate) → Max 2 (Flight) → Max 1 (Stake) → Max 3 (Crow Familiar)',
-      playstyle: 'Take aerial position using Flight. Execute low-HP retreating enemies from across the map using Assassinate to grant bonus gold rewards to your entire squad.',
-      earlyItems: ['Headshot Booster (500)', 'Extra Stamina (500)', 'Hollow Point Rounds (500)', 'Mystic Reach (500)'],
-      midItems: ['Long Range (1,250)', 'Sharpshooter (3,000)', 'Warp Stone (3,000)', 'Enduring Speed (1,250)'],
-      lateItems: ['Pristine Emblem (3,000)', 'Glass Cannon (6,200)', 'Superior Duration (3,000)', 'Headhunter (3,000)'],
-      luxuryItems: ['Lucky Shot (6,200)', 'Crippling Headshot (6,200)', 'Vampiric Burst (6,200)'],
-    },
-  };
-
-  let currentBuild = $derived(HERO_BUILDS[selectedBuildHero]);
+  // FIX §2.4 — Reactive filtered meta heroes list
+  let filteredMetaHeroes = $derived(
+    META_HEROES_EXPANDED.filter(h => {
+      if (metaRoleFilter !== 'All') {
+        const roleWords = h.role.toLowerCase();
+        const filter = metaRoleFilter.toLowerCase();
+        const roleMap = {
+          carries: ['carry', 'hypercarry', 'assassin', 'sniper', 'marksman', 'gunslinger'],
+          brawlers: ['brawler', 'melee', 'tank', 'skirmisher', 'siege'],
+          initiators: ['initiator', 'lockdown', 'summoner', 'hook', 'grapple'],
+          mages: ['mage', 'spirit', 'burst', 'burn', 'dot', 'arcane', 'illusionist'],
+          support: ['support', 'buffer', 'utility', 'medic'],
+        };
+        const keywords = roleMap[filter] ?? [filter];
+        if (!keywords.some(kw => roleWords.includes(kw))) return false;
+      }
+      if (metaSearchQuery.trim() && !h.name.toLowerCase().includes(metaSearchQuery.toLowerCase())) return false;
+      return true;
+    })
+  );
 </script>
 
 <div class="h-screen w-screen flex overflow-hidden bg-[#0c0e12] text-[#f1f5f9] select-none">
@@ -644,6 +746,23 @@
             Modding
           </div>
 
+          <!-- Home Dashboard (v1.5) -->
+          <button
+            type="button"
+            onclick={() => (activeTab = 'home')}
+            style={activeTab === 'home' ? 'border-left-color: var(--accent-primary); background-color: var(--accent-active-sidebar); color: var(--accent-light);' : undefined}
+            class="w-full h-8 px-2.5 rounded-[4px] flex items-center gap-2 text-xs transition cursor-pointer text-left
+              {activeTab === 'home'
+                ? 'border-l-2 font-semibold'
+                : 'text-[#94a3b8] hover:text-[#f1f5f9] hover:bg-[#181e28]'}"
+          >
+            <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[1.8]" viewBox="0 0 24 24">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+            <span>{t('nav.home')}</span>
+          </button>
+
           <!-- Browse Mods -->
           <button
             type="button"
@@ -660,7 +779,7 @@
                 <polyline points="2 17 12 22 22 17" />
                 <polyline points="2 12 12 17 22 12" />
               </svg>
-              <span>Browse Mods</span>
+              <span>{t('nav.mods')}</span>
             </span>
             <Badge variant="theme" text="Online" />
           </button>
@@ -680,7 +799,7 @@
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                 <circle cx="12" cy="7" r="4" />
               </svg>
-              <span>Characters</span>
+              <span>{t('nav.characters')}</span>
             </span>
           </button>
 
@@ -700,10 +819,33 @@
                 <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
                 <line x1="12" y1="22.08" x2="12" y2="12" />
               </svg>
-              <span>Installed Mods</span>
+              <span>{t('nav.installed')}</span>
             </span>
             {#if addons.length > 0}
               <Badge variant="neutral" mono={true} text={String(addons.length)} />
+            {/if}
+          </button>
+
+          <!-- Downloads (v1.5) -->
+          <button
+            type="button"
+            onclick={() => (activeTab = 'downloads')}
+            style={activeTab === 'downloads' ? 'border-left-color: var(--accent-primary); background-color: var(--accent-active-sidebar); color: var(--accent-light);' : undefined}
+            class="w-full h-8 px-2.5 rounded-[4px] flex items-center justify-between text-xs transition cursor-pointer text-left
+              {activeTab === 'downloads'
+                ? 'border-l-2 font-semibold'
+                : 'text-[#94a3b8] hover:text-[#f1f5f9] hover:bg-[#181e28]'}"
+          >
+            <span class="flex items-center gap-2">
+              <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[1.8]" viewBox="0 0 24 24">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <span>{t('nav.downloads')}</span>
+            </span>
+            {#if getActiveDownloads().length > 0}
+              <Badge variant="theme" mono={true} text={String(getActiveDownloads().length)} />
             {/if}
           </button>
         </div>
@@ -730,25 +872,26 @@
                 <path d="M12 20V4" />
                 <path d="M6 20v-6" />
               </svg>
-              <span>Meta Tier List</span>
+              <span>{t('nav.meta')}</span>
             </span>
             <Badge variant="theme" text="Live" />
           </button>
 
-          <!-- Tracker Builds -->
+          <!-- Player Profile (v1.5 — replaces Hero Builds per §4.4) -->
           <button
             type="button"
-            onclick={() => (activeTab = 'tracker_builds')}
-            style={activeTab === 'tracker_builds' ? 'border-left-color: var(--accent-primary); background-color: var(--accent-active-sidebar); color: var(--accent-light);' : undefined}
+            onclick={() => (activeTab = 'profile')}
+            style={activeTab === 'profile' ? 'border-left-color: var(--accent-primary); background-color: var(--accent-active-sidebar); color: var(--accent-light);' : undefined}
             class="w-full h-8 px-2.5 rounded-[4px] flex items-center gap-2 text-xs transition cursor-pointer text-left
-              {activeTab === 'tracker_builds'
+              {activeTab === 'profile'
                 ? 'border-l-2 font-semibold'
                 : 'text-[#94a3b8] hover:text-[#f1f5f9] hover:bg-[#181e28]'}"
           >
             <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[1.8]" viewBox="0 0 24 24">
-              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
             </svg>
-            <span>Hero Builds</span>
+            <span>{t('nav.profile')}</span>
           </button>
         </div>
 
@@ -773,7 +916,7 @@
                 <path d="M12 5v14" />
                 <path d="M5 12h14" />
               </svg>
-              <span>Create Mod</span>
+              <span>{t('nav.create_mod')}</span>
             </span>
             <Badge variant="theme" text="Wizard" />
           </button>
@@ -795,7 +938,7 @@
               <line x1="15" y1="15" x2="21" y2="21" />
               <line x1="4" y1="4" x2="9" y2="9" />
             </svg>
-            <span>VPK Fusion</span>
+            <span>{t('nav.vpk_merge')}</span>
           </button>
 
           <!-- Tool Manager -->
@@ -813,7 +956,7 @@
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
-              <span>Tool Manager</span>
+              <span>{t('nav.dashboard')}</span>
             </span>
             <Badge variant="neutral" mono={true} text="{installedCount}/{totalCount}" />
           </button>
@@ -839,7 +982,7 @@
               <polyline points="4 17 10 11 4 5" />
               <line x1="12" y1="19" x2="20" y2="19" />
             </svg>
-            <span>Activity Logs</span>
+            <span>{t('nav.logs')}</span>
           </button>
 
           <!-- Settings -->
@@ -856,7 +999,7 @@
               <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
               <circle cx="12" cy="12" r="3" />
             </svg>
-            <span>Settings</span>
+            <span>{t('nav.settings')}</span>
           </button>
         </div>
       </nav>
@@ -878,7 +1021,7 @@
         {/if}
       </div>
       <div class="text-[10px] font-mono text-[#5d6b82] flex items-center justify-between pt-0.5 border-t border-[#1a1f29]">
-        <span>v0.1.4</span>
+        <span>v0.1.5</span>
         <span class="text-[#8d99ae]">Made by str1kez</span>
       </div>
     </div>
@@ -896,16 +1039,18 @@
         <span style="color: var(--accent-light);" class="font-bold">Deadlock</span>
         <span class="text-[#55637a]">/</span>
         <span class="text-[#f1f5f9] font-medium capitalize">
-          {#if activeTab === 'mods'}Community Mods
-          {:else if activeTab === 'characters'}Characters Loadouts
-          {:else if activeTab === 'installed'}Installed Mods
-          {:else if activeTab === 'tracker_meta'}Tracker · Meta Tier List
-          {:else if activeTab === 'tracker_builds'}Tracker · Hero Builds
-          {:else if activeTab === 'create_mod'}Create Mod Wizard
-          {:else if activeTab === 'vpk_merge'}VPK Fusion Engine
-          {:else if activeTab === 'dashboard'}Tool Manager
-          {:else if activeTab === 'logs'}Activity Logs
-          {:else}Settings
+          {#if activeTab === 'home'}{t('nav.home')}
+          {:else if activeTab === 'mods'}{t('nav.mods')}
+          {:else if activeTab === 'characters'}{t('nav.characters')}
+          {:else if activeTab === 'installed'}{t('nav.installed')}
+          {:else if activeTab === 'downloads'}{t('nav.downloads')}
+          {:else if activeTab === 'tracker_meta'}{t('nav.meta')}
+          {:else if activeTab === 'profile'}{t('nav.profile')}
+          {:else if activeTab === 'create_mod'}{t('nav.create_mod')}
+          {:else if activeTab === 'vpk_merge'}{t('nav.vpk_merge')}
+          {:else if activeTab === 'dashboard'}{t('nav.dashboard')}
+          {:else if activeTab === 'logs'}{t('nav.logs')}
+          {:else}{t('nav.settings')}
           {/if}
         </span>
       </nav>
@@ -917,14 +1062,14 @@
           variant="tonal"
           size="sm"
           onclick={launchGameVanilla}
-          title="Launch Deadlock in vanilla mode without custom addons (-disableaddons)"
+          title="Launch Deadlock in Clean Vanilla mode (temporarily isolates custom VPK mods)"
         >
           <span class="inline-flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[2]" viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="10" />
               <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
             </svg>
-            <span>Play (Vanilla)</span>
+            <span>{t('home.play_vanilla')}</span>
           </span>
         </Button>
 
@@ -939,7 +1084,7 @@
             <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
               <polygon points="5 3 19 12 5 21 5 3" />
             </svg>
-            <span>Play with Mods</span>
+            <span>{t('home.play_modded')}</span>
           </span>
         </Button>
 
@@ -949,6 +1094,9 @@
           onclick={() => {
             if (activeTab === 'mods') syncWithGameBanana();
             else if (activeTab === 'characters' || activeTab === 'installed') loadAddons();
+            else if (activeTab === 'home') { loadAddons(); loadPlayer(); loadDiskFreeSpace(); }
+            else if (activeTab === 'profile') loadPlayer();
+            else if (activeTab === 'logs') loadGameLogs();
             else refreshConfig();
           }}
           title="Refresh view"
@@ -965,16 +1113,183 @@
     <main class="flex-1 overflow-y-auto p-5">
 
       <!-- ─────────────────────────────────────────────────────────────────── -->
+      <!-- TAB 0: HOME DASHBOARD (v1.5)                                       -->
+      <!-- ─────────────────────────────────────────────────────────────────── -->
+      {#if activeTab === 'home'}
+        <div class="space-y-4 max-w-5xl mx-auto">
+          <!-- Welcome Banner -->
+          <div class="p-5 bg-[#171c26] border border-[#252f40] rounded-[6px] flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+              <div class="w-12 h-12 rounded-full bg-[#1a212e] border border-[#2a3648] flex items-center justify-center text-xl font-bold text-[var(--accent-light)] shrink-0">
+                {(getPlayer()?.persona_name?.[0] || 'D').toUpperCase()}
+              </div>
+              <div>
+                <div class="text-xs text-[#828fa3]">{t('home.welcome')}</div>
+                <div class="text-base font-bold text-[#f1f5f9]">{getPlayer()?.persona_name || 'Steam User'}</div>
+                <div class="text-xs text-[#828fa3] font-mono mt-0.5">
+                  Account ID: {getPlayer()?.account_id || '—'} · {t('home.deadlock_build')} #{deadlockBuildId}
+                </div>
+              </div>
+            </div>
+            <div class="flex flex-col items-end gap-1.5">
+              {#if config?.deadlock_game_dir}
+                <div style="color: var(--accent-light);" class="inline-flex items-center gap-1.5 text-xs font-medium">
+                  <span style="background-color: var(--accent-primary);" class="w-2 h-2 rounded-full animate-pulse"></span>
+                  <span>Deadlock Linked</span>
+                </div>
+                <div class="text-[11px] font-mono text-[#5d6b82] truncate max-w-[260px]">{config.deadlock_game_dir}</div>
+              {:else}
+                <div class="inline-flex items-center gap-1.5 text-xs font-medium text-[#f59e0b]">
+                  <span class="w-2 h-2 rounded-full bg-[#f59e0b]"></span>
+                  <span>Game Not Linked</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Vanilla Mode Alert Banner -->
+          {#if vanillaActive}
+            <div class="p-4 bg-[#2d1a06] border border-[#f59e0b]/40 rounded-[6px] flex items-center justify-between gap-4">
+              <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 text-[#f59e0b] fill-none stroke-current stroke-[2] shrink-0" viewBox="0 0 24 24">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                <div>
+                  <div class="text-sm font-semibold text-[#f59e0b]">{t('home.vanilla_active')}</div>
+                  <div class="text-xs text-[#d97706]">{vanillaIsolatedCount} {t('home.vanilla_desc')}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onclick={restoreVanillaAddons}
+                class="px-3 py-1.5 bg-[#f59e0b] text-[#0c0e12] text-xs font-semibold rounded-[4px] hover:bg-[#fbbf24] transition cursor-pointer shrink-0"
+              >
+                {t('home.restore_mods')}
+              </button>
+            </div>
+          {/if}
+
+          <!-- Quick Launch Bar -->
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-[#5d6b82]">{t('home.quick_launch')}</h3>
+            <div class="flex flex-wrap gap-2.5">
+              <Button variant="filled" size="sm" onclick={() => (isLaunchModalOpen = true)}>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                  <span>{t('home.play_modded')}</span>
+                </span>
+              </Button>
+              <Button variant="tonal" size="sm" onclick={launchGameVanilla} disabled={vanillaActive}>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[2]" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                  </svg>
+                  <span>{t('home.play_vanilla')}</span>
+                </span>
+              </Button>
+              <Button variant="tonal" size="sm" onclick={openAddonsDir}>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[1.8]" viewBox="0 0 24 24">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span>{t('home.open_addons')}</span>
+                </span>
+              </Button>
+            </div>
+          </div>
+
+          <!-- Mod Stats Grid (§4.1.3) -->
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-1">
+              <div class="text-[10px] uppercase font-bold text-[#5d6b82]">{t('home.active_count')}</div>
+              <div style="color: var(--accent-light);" class="text-2xl font-bold font-mono">
+                {addons.filter(a => a.enabled).length}
+              </div>
+              <div class="text-[11px] text-[#828fa3]">VPK</div>
+            </div>
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-1">
+              <div class="text-[10px] uppercase font-bold text-[#5d6b82]">{t('home.disabled_count')}</div>
+              <div class="text-2xl font-bold font-mono text-[#64748b]">
+                {addons.filter(a => !a.enabled).length}
+              </div>
+              <div class="text-[11px] text-[#828fa3]">.disabled</div>
+            </div>
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-1">
+              <div class="text-[10px] uppercase font-bold text-[#5d6b82]">{t('home.gb_status')}</div>
+              <div class="text-2xl font-bold font-mono {gbLatencyMs !== null ? (gbLatencyMs < 200 ? 'text-[#34d399]' : gbLatencyMs < 500 ? 'text-[#fbbf24]' : 'text-[#ef4444]') : 'text-[#64748b]'}">
+                {gbLatencyMs !== null ? `${gbLatencyMs}ms` : '—'}
+              </div>
+              <div class="text-[11px] text-[#828fa3]">GameBanana API</div>
+            </div>
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-1">
+              <div class="text-[10px] uppercase font-bold text-[#5d6b82]">{t('home.disk_space')}</div>
+              <div class="text-2xl font-bold font-mono text-[#38bdf8]">{formatDiskBytes(diskFreeBytes)}</div>
+              <div class="text-[11px] text-[#828fa3]">available</div>
+            </div>
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-1 col-span-2 md:col-span-1">
+              <div class="text-[10px] uppercase font-bold text-[#5d6b82]">{t('home.installed_count')}</div>
+              <div class="text-2xl font-bold font-mono text-[#f1f5f9]">{addons.length}</div>
+              <div class="text-[11px] text-[#828fa3]">packages</div>
+            </div>
+          </div>
+
+          <!-- Quick Heroes Access (§4.1.4) -->
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2.5">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-[#5d6b82]">{t('nav.characters')}</h3>
+              <button type="button" onclick={() => { activeTab = 'characters'; loadAddons(); }} class="text-[11px] text-[#5d6b82] hover:text-[var(--accent-light)] transition cursor-pointer">→</button>
+            </div>
+            <div class="flex items-center gap-2 overflow-x-auto pb-1">
+              {#each ['Seven', 'Abrams', 'Vindicta', 'Haze', 'Infernus', 'Ivy', 'Apollo', 'Rat King', 'Celeste', 'Graves'] as h}
+                <button
+                  type="button"
+                  onclick={() => { selectedCharacter = h; activeTab = 'characters'; loadAddons(); }}
+                  class="px-2.5 py-1.5 rounded-[5px] bg-[#12161f] hover:bg-[#1a212e] border border-[#252f40] hover:border-[var(--accent-primary)] flex items-center gap-2 text-xs text-[#cbd5e1] shrink-0 transition cursor-pointer"
+                >
+                  <HeroIcon name={h} size={20} />
+                  <span>{h}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <!-- Recent App Logs (last 5) -->
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-[#5d6b82]">{t('home.recent_activity')}</h3>
+              <button type="button" onclick={() => (activeTab = 'logs')} class="text-[11px] text-[#5d6b82] hover:text-[var(--accent-light)] transition cursor-pointer">{t('home.view_all')}</button>
+            </div>
+            <div class="space-y-1 font-mono text-[11px]">
+              {#each logs.slice(0, 5) as log}
+                <div class="flex items-start gap-2 leading-relaxed">
+                  <span class="text-[#55637a] shrink-0">{log.time}</span>
+                  <span class="shrink-0 uppercase font-bold
+                    {log.level === 'error' ? 'text-[#ef4444]' : log.level === 'warn' ? 'text-[#f59e0b]' : log.level === 'success' ? 'text-[var(--accent-light)]' : 'text-[#60a5fa]'}">
+                    [{log.level}]
+                  </span>
+                  <span class="text-[#e2e8f0] break-all">{log.message}</span>
+                </div>
+              {:else}
+                <div class="text-[#5d6b82] italic">{t('logs.empty')}</div>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+      <!-- ─────────────────────────────────────────────────────────────────── -->
       <!-- TAB 1: COMMUNITY MODS (GAMEBANANA BROWSER WITH INFINITE SCROLL)     -->
       <!-- ─────────────────────────────────────────────────────────────────── -->
-      {#if activeTab === 'mods'}
+      {:else if activeTab === 'mods'}
         <div class="space-y-4 max-w-7xl mx-auto">
           <!-- Banner & Search / Filter Controls -->
           <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div class="flex items-center gap-2.5">
-                  <h2 class="text-sm font-bold text-[#f1f5f9]">Deadlock Community Mods</h2>
+                  <h2 class="text-sm font-bold text-[#f1f5f9]">{t('mods.title')}</h2>
                   <button
                     type="button"
                     onclick={syncWithGameBanana}
@@ -983,14 +1298,14 @@
                     title="Click to refresh GameBanana feed and measure server latency"
                   >
                     <span style="background-color: var(--accent-light);" class="w-1.5 h-1.5 rounded-full {isPinging ? 'animate-ping' : ''}"></span>
-                    <span>Sync with GameBanana</span>
+                    <span>{t('mods.sync')}</span>
                     {#if gbLatencyMs !== null}
                       <span style="color: var(--accent-light);" class="font-bold ml-1">{gbLatencyMs} ms</span>
                     {/if}
                   </button>
                 </div>
                 <p class="text-xs text-[#828fa3] mt-1">
-                  Synchronized with GameBanana repository. Preview screenshots, inspect file variants, and install with a single click.
+                  {t('mods.subtitle')}
                 </p>
               </div>
 
@@ -1002,8 +1317,8 @@
                   class="h-8 px-2 bg-[#101319] text-xs text-[#f1f5f9] rounded-[5px] border border-[#263143] focus:border-[var(--accent-primary)] transition cursor-pointer"
                   title="Filter mods by Deadlock character"
                 >
-                  <option value="All">All Heroes</option>
-                  {#each DEADLOCK_HEROES as hero}
+                  <option value="All">{t('mods.all_heroes')}</option>
+                  {#each HERO_NAMES as hero}
                     <option value={hero}>{hero}</option>
                   {/each}
                 </select>
@@ -1011,7 +1326,7 @@
                 <div class="w-full sm:w-64">
                   <input
                     type="text"
-                    placeholder="Search mods…"
+                    placeholder={t('mods.search')}
                     value={searchQuery}
                     oninput={handleSearchInput}
                     class="h-8 w-full px-3 py-1.5 bg-[#101319] text-xs text-[#f1f5f9] placeholder-[#55637a] rounded-[5px] border border-[#263143] focus:border-[var(--accent-primary)] transition"
@@ -1088,7 +1403,7 @@
               {#each modsList as item (item.id)}
                 <ModCard
                   mod={item}
-                  onclick={() => openModDetails(item.id)}
+                  onclick={() => openModDetails(item.id, item.item_type)}
                 />
               {/each}
             </div>
@@ -1142,7 +1457,7 @@
               </div>
 
               <div class="flex-1 overflow-y-auto p-2 space-y-1">
-                {#each DEADLOCK_HEROES.filter(h => !characterSearch.trim() || h.toLowerCase().includes(characterSearch.toLowerCase())) as hero}
+                {#each HERO_NAMES.filter(h => !characterSearch.trim() || h.toLowerCase().includes(characterSearch.toLowerCase())) as hero}
                   {@const heroMods = addons.filter(a => a.detected_hero?.toLowerCase() === hero.toLowerCase())}
                   {@const hasActive = heroMods.some(a => a.enabled)}
                   {@const icon = getHeroIcon(hero)}
@@ -1220,6 +1535,8 @@
               <div class="flex-1 overflow-y-auto p-3.5 space-y-3">
                 <!-- Option 1: Default Game Skin -->
                 <div
+                  role="button"
+                  tabindex="0"
                   onclick={() => {
                     selectedModForInspector = {
                       isDefault: true,
@@ -1227,6 +1544,17 @@
                       mod_title: `${selectedCharacter} Default Vanilla Model`,
                       enabled: !activeHeroSkin,
                     };
+                  }}
+                  onkeydown={(e) => {
+                    if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                      e.preventDefault();
+                      selectedModForInspector = {
+                        isDefault: true,
+                        filename: 'valve_source2_base.vpk',
+                        mod_title: `${selectedCharacter} Default Vanilla Model`,
+                        enabled: !activeHeroSkin,
+                      };
+                    }
                   }}
                   class="p-3 rounded-[5px] border transition cursor-pointer flex items-center justify-between gap-3
                     {!activeHeroSkin ? 'bg-[#182230] border-[var(--accent-primary)]' : 'bg-[#151922] border-[#252f40] hover:border-[#33425b]'}"
@@ -1275,7 +1603,15 @@
                 {:else}
                   {#each selectedHeroMods as mod (mod.filename)}
                     <div
+                      role="button"
+                      tabindex="0"
                       onclick={() => (selectedModForInspector = mod)}
+                      onkeydown={(e) => {
+                        if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          selectedModForInspector = mod;
+                        }
+                      }}
                       class="p-3 rounded-[5px] border transition cursor-pointer flex items-center justify-between gap-3
                         {mod.enabled ? 'bg-[#182230] border-[var(--accent-primary)]' : 'bg-[#151922] border-[#252f40] hover:border-[#33425b]'}"
                     >
@@ -1463,6 +1799,8 @@
                         </span>
                         {#if addon.detected_hero}
                           <Badge variant="theme" text={addon.detected_hero} />
+                        {:else}
+                          <Badge variant="neutral" text={t('common.global_mod')} />
                         {/if}
                       </div>
                       {#if addon.author}
@@ -1518,20 +1856,34 @@
               </div>
 
               <!-- Role Filters -->
-              <div class="flex items-center gap-1.5 overflow-x-auto text-xs">
-                {#each ['All', 'Carries', 'Brawlers', 'Initiators', 'Mages', 'Support'] as role}
+              <div class="flex flex-wrap items-center gap-1.5 overflow-x-auto text-xs">
+                {#each [
+                  { id: 'All', label: t('meta.role_all') },
+                  { id: 'Carries', label: t('meta.role_carries') },
+                  { id: 'Brawlers', label: t('meta.role_brawlers') },
+                  { id: 'Initiators', label: t('meta.role_initiators') },
+                  { id: 'Mages', label: t('meta.role_mages') },
+                  { id: 'Support', label: t('meta.role_support') },
+                ] as role}
                   <button
                     type="button"
-                    onclick={() => (metaRoleFilter = role)}
-                    style={metaRoleFilter === role ? 'background-color: var(--accent-primary); color: var(--accent-on-primary);' : undefined}
+                    onclick={() => (metaRoleFilter = role.id)}
+                    style={metaRoleFilter === role.id ? 'background-color: var(--accent-primary); color: var(--accent-on-primary);' : undefined}
                     class="h-6 px-2.5 rounded-[4px] text-[11px] font-medium transition cursor-pointer
-                      {metaRoleFilter === role
+                      {metaRoleFilter === role.id
                         ? 'font-semibold'
                         : 'bg-[#1b222f] hover:bg-[#252f40] text-[#94a3b8] hover:text-[#f1f5f9] border border-[#283446]'}"
                   >
-                    {role}
+                    {role.label}
                   </button>
                 {/each}
+                <!-- FIX §2.4 — inline hero search -->
+                <input
+                  type="text"
+                  placeholder={t('meta.search')}
+                  bind:value={metaSearchQuery}
+                  class="h-6 px-2 bg-[#101319] text-[11px] text-[#f1f5f9] placeholder-[#55637a] rounded border border-[#263143] focus:border-[var(--accent-primary)] transition"
+                />
               </div>
             </div>
           </div>
@@ -1554,14 +1906,12 @@
                 </tr>
               </thead>
               <tbody class="divide-y divide-[#1e2535] font-mono text-[11px]">
-                {#each META_HEROES_EXPANDED as mh}
+                {#each filteredMetaHeroes as mh}
                   <tr class="hover:bg-[#1a212e] transition">
                     <td class="py-2.5 text-[#828fa3]">#{mh.rank}</td>
                     <td class="py-2.5 font-sans font-semibold text-[#f1f5f9]">
                       <div class="flex items-center gap-2">
-                        {#if getHeroIcon(mh.name)}
-                          <img src={getHeroIcon(mh.name)} alt={mh.name} class="w-6 h-6 rounded-[3px] object-contain border border-[#2a3648]" />
-                        {/if}
+                        <HeroIcon name={mh.name} size={24} />
                         <span>{mh.name}</span>
                       </div>
                     </td>
@@ -1578,17 +1928,13 @@
                     <td class="py-2.5 text-[#fbbf24]">{mh.dpm}</td>
                     <td class="py-2.5 text-[#a7f3d0] font-sans">
                       <span class="flex items-center gap-1.5">
-                        {#if getHeroIcon(mh.synergy)}
-                          <img src={getHeroIcon(mh.synergy)} alt={mh.synergy} class="w-4 h-4 rounded-full" />
-                        {/if}
+                        <HeroIcon name={mh.synergy} size={16} />
                         {mh.synergy}
                       </span>
                     </td>
                     <td class="py-2.5 text-[#fca5a5] font-sans">
                       <span class="flex items-center gap-1.5">
-                        {#if getHeroIcon(mh.counter)}
-                          <img src={getHeroIcon(mh.counter)} alt={mh.counter} class="w-4 h-4 rounded-full" />
-                        {/if}
+                        <HeroIcon name={mh.counter} size={16} />
                         {mh.counter}
                       </span>
                     </td>
@@ -1600,122 +1946,139 @@
         </div>
 
       <!-- ─────────────────────────────────────────────────────────────────── -->
-      <!-- TAB 5: TRACKER · HERO BUILDS & PROGRESSION                          -->
+      <!-- TAB: DOWNLOADS (v1.5)                                               -->
       <!-- ─────────────────────────────────────────────────────────────────── -->
-      {:else if activeTab === 'tracker_builds'}
-        <div class="space-y-4 max-w-6xl mx-auto">
-          <!-- Builds Hero Selector Bar -->
-          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
-            <h2 class="text-sm font-bold text-[#f1f5f9]">Competitive Deadlock Hero Builds</h2>
-            <div class="flex items-center gap-2 overflow-x-auto pb-1">
-              {#each Object.keys(HERO_BUILDS) as hero}
-                <button
-                  type="button"
-                  onclick={() => (selectedBuildHero = hero)}
-                  style={selectedBuildHero === hero ? 'border-color: var(--accent-primary); background-color: var(--accent-active-sidebar);' : undefined}
-                  class="h-8 px-3 rounded-[4px] border flex items-center gap-2 text-xs font-semibold transition cursor-pointer shrink-0
-                    {selectedBuildHero === hero
-                      ? 'text-[#f1f5f9]'
-                      : 'bg-[#151a24] border-[#252f40] text-[#94a3b8] hover:text-[#f1f5f9]'}"
-                >
-                  {#if getHeroIcon(hero)}
-                    <img src={getHeroIcon(hero)} alt={hero} class="w-4 h-4 rounded-full" />
-                  {/if}
-                  <span>{hero}</span>
-                </button>
+      {:else if activeTab === 'downloads'}
+        <div class="space-y-4 max-w-3xl mx-auto">
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-bold text-[#f1f5f9]">{t('downloads.title')}</h2>
+              <p class="text-xs text-[#828fa3] mt-1">{t('downloads.subtitle')}</p>
+            </div>
+            <Button variant="tonal" size="sm" onclick={() => clearCompleted()}>
+              {t('downloads.clear')}
+            </Button>
+          </div>
+
+          <!-- Active Downloads -->
+          {#if getActiveDownloads().length > 0}
+            <div class="space-y-2">
+              <div class="text-[11px] uppercase font-bold tracking-wider text-[#5d6b82] px-1">{t('downloads.active')}</div>
+              {#each getActiveDownloads() as dl (`${dl.mod_id}:${dl.filename}`)}
+                <DownloadItemCard item={dl} />
               {/each}
+            </div>
+          {/if}
+
+          <!-- Completed Downloads -->
+          {#if getCompletedDownloads().length > 0}
+            <div class="space-y-2">
+              <div class="text-[11px] uppercase font-bold tracking-wider text-[#5d6b82] px-1">{t('downloads.completed')}</div>
+              {#each getCompletedDownloads() as dl (`${dl.mod_id}:${dl.filename}`)}
+                <DownloadItemCard item={dl} />
+              {/each}
+            </div>
+          {/if}
+
+          {#if getActiveDownloads().length === 0 && getCompletedDownloads().length === 0}
+            <div class="p-12 bg-[#171c26] border border-[#252f40] rounded-[6px] text-center space-y-2">
+              <svg class="w-10 h-10 mx-auto stroke-[#5d6b82] fill-none stroke-[1.5]" viewBox="0 0 24 24">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <p class="text-xs text-[#828fa3]">{t('downloads.empty')}</p>
+            </div>
+          {/if}
+        </div>
+
+      <!-- ─────────────────────────────────────────────────────────────────── -->
+      <!-- TAB: PLAYER PROFILE (v1.5 — replaces Hero Builds §4.4)              -->
+      <!-- ─────────────────────────────────────────────────────────────────── -->
+      {:else if activeTab === 'profile'}
+        <div class="space-y-4 max-w-2xl mx-auto">
+          <div class="p-5 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-4">
+            <h2 class="text-sm font-bold text-[#f1f5f9]">{t('profile.title')}</h2>
+
+            {#if getPlayer()}
+              {@const player = getPlayer()}
+              <div class="flex items-center gap-4">
+                <div class="w-16 h-16 rounded-full bg-[#1a212e] border border-[#2a3648] flex items-center justify-center text-2xl font-bold text-[var(--accent-light)] shrink-0">
+                  {(player.persona_name?.[0] || 'S').toUpperCase()}
+                </div>
+                <div class="space-y-1">
+                  <div class="text-base font-bold text-[#f1f5f9]">{player.persona_name || 'Unknown'}</div>
+                  <div class="text-xs font-mono text-[#828fa3]">SteamID64: {player.steam_id_64 || '—'}</div>
+                  <div class="text-xs font-mono text-[#828fa3]">Account ID: {player.account_id || '—'}</div>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap gap-2 pt-2 border-t border-[#212938]">
+                {#if player.statlocker_url}
+                  <Button variant="tonal" size="sm" onclick={() => invoke('open_browser_url', { url: player.statlocker_url })}>
+                    <span class="inline-flex items-center gap-1.5">
+                      <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[2]" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+                      {t('profile.open_statlocker')}
+                    </span>
+                  </Button>
+                {/if}
+                {#if player.account_id}
+                  <Button variant="tonal" size="sm" onclick={() => invoke('open_browser_url', { url: `https://tracklock.gg/players/${player.account_id}` })}>
+                    <span class="inline-flex items-center gap-1.5">
+                      <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[2]" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+                      {t('profile.open_tracklock')}
+                    </span>
+                  </Button>
+                {/if}
+              </div>
+            {:else}
+              <div class="py-8 text-center space-y-2">
+                <p class="text-xs text-[#828fa3]">{t('profile.not_detected')}</p>
+                <Button variant="tonal" size="sm" onclick={() => loadPlayer()}>{t('profile.retry')}</Button>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Manual Account ID override -->
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-[#5d6b82]">{t('profile.set_account')}</h3>
+              <p class="text-[11px] text-[#828fa3] mt-1">Specify your Steam32 Friend Code / Account ID if automatic detection is unavailable.</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <input
+                type="number"
+                bind:value={manualAccountInput}
+                placeholder="e.g. 123456789"
+                class="flex-1 h-8 px-3 bg-[#101319] text-xs font-mono text-[#f1f5f9] placeholder-[#55637a] rounded border border-[#263143] focus:border-[var(--accent-primary)] transition"
+              />
+              <Button variant="filled" size="sm" onclick={() => {
+                const n = Number(manualAccountInput);
+                if (Number.isInteger(n) && n > 0) setManualAccountId(n);
+              }}>
+                {t('profile.apply')}
+              </Button>
             </div>
           </div>
 
-          <!-- Selected Build Breakdown -->
-          {#if currentBuild}
-            <div class="space-y-4">
-              <!-- Build Title & Summary -->
-              <div class="p-5 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2.5">
-                <div class="flex flex-wrap items-center justify-between gap-3">
-                  <div class="flex items-center gap-3">
-                    {#if getHeroIcon(selectedBuildHero)}
-                      <img src={getHeroIcon(selectedBuildHero)} alt={selectedBuildHero} class="w-10 h-10 rounded-[5px] object-contain border border-[#2b374a]" />
-                    {/if}
-                    <div>
-                      <h3 class="text-sm font-bold text-[#f1f5f9]">{selectedBuildHero} — {currentBuild.title}</h3>
-                      <div class="text-[11px] font-mono text-[#828fa3] mt-0.5">
-                        Win Rate: <strong class="text-[#34d399]">{currentBuild.winrate}</strong> across {currentBuild.matches} tracked matches
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="p-3 bg-[#11141c] border border-[#212938] rounded-[5px] space-y-1">
-                  <div class="text-[10px] uppercase font-bold text-[#5d6b82]">Skill Leveling Priority</div>
-                  <div class="text-xs font-mono text-[#cbd5e1]">{currentBuild.skillPriority}</div>
-                </div>
-
-                <p class="text-xs text-[#94a3b8] leading-relaxed pt-1">
-                  {currentBuild.playstyle}
-                </p>
-              </div>
-
-              <!-- Item Progression Stages -->
-              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                <!-- Early -->
-                <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
-                  <div class="text-xs font-bold text-[#38bdf8] border-b border-[#212938] pb-1.5">
-                    1. Early Game (500 Souls)
-                  </div>
-                  <div class="space-y-1.5 text-xs font-mono">
-                    {#each currentBuild.earlyItems as it}
-                      <div class="p-1.5 bg-[#12151c] rounded border border-[#212938] text-[#cbd5e1]">
-                        {it}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-
-                <!-- Mid -->
-                <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
-                  <div class="text-xs font-bold text-[#34d399] border-b border-[#212938] pb-1.5">
-                    2. Mid Game Core (1,250 Souls)
-                  </div>
-                  <div class="space-y-1.5 text-xs font-mono">
-                    {#each currentBuild.midItems as it}
-                      <div class="p-1.5 bg-[#12151c] rounded border border-[#212938] text-[#cbd5e1]">
-                        {it}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-
-                <!-- Late -->
-                <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
-                  <div class="text-xs font-bold text-[#fbbf24] border-b border-[#212938] pb-1.5">
-                    3. Late Spikes (3,000 Souls)
-                  </div>
-                  <div class="space-y-1.5 text-xs font-mono">
-                    {#each currentBuild.lateItems as it}
-                      <div class="p-1.5 bg-[#12151c] rounded border border-[#212938] text-[#cbd5e1]">
-                        {it}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-
-                <!-- Luxury -->
-                <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
-                  <div class="text-xs font-bold text-[#c084fc] border-b border-[#212938] pb-1.5">
-                    4. End Game / Luxury (6,200)
-                  </div>
-                  <div class="space-y-1.5 text-xs font-mono">
-                    {#each currentBuild.luxuryItems as it}
-                      <div class="p-1.5 bg-[#12151c] rounded border border-[#212938] text-[#cbd5e1]">
-                        {it}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              </div>
-            </div>
-          {/if}
+          <!-- Stats Integration Card -->
+          <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-2">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-[#5d6b82]">{t('profile.recent_matches')}</h3>
+            <p class="text-xs text-[#828fa3]">
+              Full Deadlock match history, MMR rank badge, winrate and top hero stats are available directly on
+              {#if getPlayer()?.statlocker_url}
+                <button type="button" onclick={() => invoke('open_browser_url', { url: getPlayer().statlocker_url })} class="text-[var(--accent-light)] hover:underline cursor-pointer bg-transparent border-none p-0">Statlocker</button>
+              {:else}
+                <span class="text-[#5d6b82]">Statlocker</span>
+              {/if}
+              and
+              {#if getPlayer()?.account_id}
+                <button type="button" onclick={() => invoke('open_browser_url', { url: `https://tracklock.gg/players/${getPlayer().account_id}` })} class="text-[var(--accent-light)] hover:underline cursor-pointer bg-transparent border-none p-0">Tracklock.gg</button>
+              {:else}
+                <span class="text-[#5d6b82]">Tracklock.gg</span>
+              {/if}.
+            </p>
+          </div>
         </div>
 
       <!-- ─────────────────────────────────────────────────────────────────── -->
@@ -1723,7 +2086,7 @@
       <!-- ─────────────────────────────────────────────────────────────────── -->
       {:else if activeTab === 'create_mod'}
         <CreateModWizard
-          heroes={DEADLOCK_HEROES}
+          heroes={HERO_NAMES}
           getHeroIcon={getHeroIcon}
           onModCreated={() => { loadAddons(); }}
         />
@@ -1766,77 +2129,170 @@
         </div>
 
       <!-- ─────────────────────────────────────────────────────────────────── -->
-      <!-- TAB 9: ACTIVITY LOGS                                                -->
+      <!-- TAB 9: ACTIVITY LOGS (v1.5 Session & Deadlock Console Logs)         -->
       <!-- ─────────────────────────────────────────────────────────────────── -->
       {:else if activeTab === 'logs'}
         <div class="space-y-3 max-w-5xl mx-auto h-full flex flex-col">
-          <div class="flex items-center justify-between">
-            <h2 class="text-sm font-bold text-[#f1f5f9]">System & Process Logs</h2>
-            <div class="flex items-center gap-2">
-              <Button variant="tonal" size="sm" onclick={copyLogsToClipboard}>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-bold text-[#f1f5f9]">{t('logs.title')}</h2>
+            <div class="flex flex-wrap items-center gap-2">
+              {#each [
+                { id: 'all', label: t('logs.filter_all') },
+                { id: 'info', label: t('logs.filter_info') },
+                { id: 'error', label: t('logs.filter_error') },
+                { id: 'game', label: t('logs.filter_game') },
+              ] as f}
+                <button
+                  type="button"
+                  onclick={() => (logsFilter = f.id)}
+                  style={logsFilter === f.id ? 'background-color: var(--accent-primary); color: var(--accent-on-primary);' : undefined}
+                  class="h-6 px-2.5 rounded-[4px] text-[11px] font-medium transition cursor-pointer
+                    {logsFilter === f.id ? 'font-semibold' : 'bg-[#1b222f] text-[#94a3b8] hover:text-[#f1f5f9] border border-[#283446]'}"
+                >{f.label}</button>
+              {/each}
+
+              <Button variant="tonal" size="sm" onclick={loadGameLogs} title="Load Deadlock console.log">
                 <span class="inline-flex items-center gap-1.5">
                   <svg class="w-3.5 h-3.5 stroke-current fill-none stroke-[2]" viewBox="0 0 24 24">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
                   </svg>
-                  <span>{logsCopied ? 'Copied!' : 'Copy Logs'}</span>
+                  <span>{t('logs.load_game')}</span>
                 </span>
               </Button>
 
-              <Button variant="tonal" size="sm" onclick={() => (logs = [])}>
-                Clear Logs
+              <Button variant="tonal" size="sm" onclick={saveLogsToDisk}>
+                <span>{logsSaved ? t('logs.saved') : t('logs.save')}</span>
+              </Button>
+
+              <Button variant="tonal" size="sm" onclick={openLogsFolder}>
+                <span>{t('logs.open_folder')}</span>
+              </Button>
+
+              <Button variant="tonal" size="sm" onclick={copyLogsToClipboard}>
+                <span>{logsCopied ? t('logs.copied') : t('logs.copy')}</span>
+              </Button>
+
+              <Button variant="tonal" size="sm" onclick={() => { logs = []; gameLogs = []; }}>
+                {t('logs.clear')}
               </Button>
             </div>
           </div>
 
           <div class="flex-1 min-h-[450px] p-3.5 bg-[#0e1117] border border-[#202734] rounded-[5px] font-mono text-[11px] overflow-y-auto space-y-1">
-            {#each logs as log}
+            {#each [
+              ...logs.map(l => ({ ...l, source: 'app' })),
+              ...(Array.isArray(gameLogs) ? gameLogs : []),
+            ].filter(log => {
+              if (logsFilter === 'all') return true;
+              if (logsFilter === 'info') return log.level === 'info' || log.level === 'success';
+              if (logsFilter === 'error') return log.level === 'error' || log.level === 'warn';
+              if (logsFilter === 'game') return log.source === 'game';
+              return true;
+            }).slice(0, 300) as log}
               <div class="flex items-start gap-2.5 leading-relaxed">
-                <span class="text-[#55637a] shrink-0 select-none">{log.time}</span>
-                <span class="shrink-0 uppercase font-bold
-                  {log.level === 'error' ? 'text-[#ef4444]' : log.level === 'warn' ? 'text-[#f59e0b]' : log.level === 'success' ? 'text-[var(--accent-light)]' : 'text-[#60a5fa]'}">
-                  [{log.level}]
-                </span>
+                <span class="text-[#55637a] shrink-0 select-none">{log.time || '--:--:--'}</span>
+                {#if log.source === 'game'}
+                  <span class="shrink-0 uppercase font-bold text-[#a78bfa]">[GAME]</span>
+                {:else}
+                  <span class="shrink-0 uppercase font-bold
+                    {log.level === 'error' ? 'text-[#ef4444]' : log.level === 'warn' ? 'text-[#f59e0b]' : log.level === 'success' ? 'text-[var(--accent-light)]' : 'text-[#60a5fa]'}">
+                    [{log.level}]
+                  </span>
+                {/if}
                 <span class="text-[#e2e8f0] break-all">{log.message}</span>
               </div>
+            {:else}
+              <div class="text-[#5d6b82] italic py-4 text-center">{t('logs.empty')}</div>
             {/each}
           </div>
         </div>
 
       <!-- ─────────────────────────────────────────────────────────────────── -->
-      <!-- TAB 10: SETTINGS (THEMES & DIRECTORIES)                             -->
+      <!-- TAB 10: SETTINGS (LANGUAGE, UI SCALE, THEMES & DIRECTORIES)         -->
       <!-- ─────────────────────────────────────────────────────────────────── -->
       {:else if activeTab === 'settings'}
         <div class="space-y-4 max-w-3xl mx-auto">
+          <!-- Language & UI Scaling (v1.5 §4.8, §4.9) -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Interface Language -->
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
+              <div>
+                <h2 class="text-sm font-bold text-[#f1f5f9]">{t('settings.language')}</h2>
+                <p class="text-xs text-[#828fa3] mt-0.5">{t('settings.language_desc')}</p>
+              </div>
+              <div class="flex items-center gap-2">
+                {#each [
+                  { id: 'ru', label: 'Русский (RU)' },
+                  { id: 'en', label: 'English (EN)' },
+                ] as lng}
+                  <button
+                    type="button"
+                    onclick={() => changeUiLang(lng.id)}
+                    style={uiLang === lng.id ? 'background-color: var(--accent-primary); color: var(--accent-on-primary);' : undefined}
+                    class="flex-1 h-8 px-3 rounded-[4px] text-xs transition cursor-pointer
+                      {uiLang === lng.id
+                        ? 'font-semibold'
+                        : 'bg-[#12151c] border border-[#263143] text-[#94a3b8] hover:text-[#f1f5f9]'}"
+                  >
+                    {lng.label}
+                  </button>
+                {/each}
+              </div>
+            </div>
+
+            <!-- UI Scale -->
+            <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
+              <div>
+                <h2 class="text-sm font-bold text-[#f1f5f9]">{t('settings.scale')}</h2>
+                <p class="text-xs text-[#828fa3] mt-0.5">{t('settings.scale_desc')}</p>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5">
+                {#each SCALE_OPTIONS as sc}
+                  <button
+                    type="button"
+                    onclick={() => changeUiScale(sc)}
+                    style={uiScale === sc ? 'background-color: var(--accent-primary); color: var(--accent-on-primary);' : undefined}
+                    class="h-8 px-2 rounded-[4px] text-xs font-mono transition cursor-pointer
+                      {uiScale === sc
+                        ? 'font-bold'
+                        : 'bg-[#12151c] border border-[#263143] text-[#94a3b8] hover:text-[#f1f5f9]'}"
+                  >
+                    {sc}%
+                  </button>
+                {/each}
+              </div>
+            </div>
+          </div>
+
           <!-- Theme Switcher Card with Circular Color Palette Swatches -->
           <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-3">
-            <h2 class="text-sm font-bold text-[#f1f5f9]">Color Theme</h2>
+            <h2 class="text-sm font-bold text-[#f1f5f9]">{t('settings.theme')}</h2>
             <p class="text-xs text-[#828fa3]">
-              Select an accent color palette for the user interface.
+              {t('settings.theme_desc')}
             </p>
 
             <div class="grid grid-cols-1 sm:grid-cols-5 gap-2.5 pt-1">
-              {#each THEMES as t}
+              {#each THEMES as th}
                 <button
                   type="button"
-                  onclick={() => applyTheme(t.id)}
-                  style={currentTheme === t.id ? `border-color: ${t.hex}; box-shadow: 0 0 10px ${t.hex}44;` : undefined}
+                  onclick={() => applyTheme(th.id)}
+                  style={currentTheme === th.id ? `border-color: ${th.hex}; box-shadow: 0 0 10px ${th.hex}44;` : undefined}
                   class="p-3 rounded-[5px] bg-[#12151c] border transition cursor-pointer text-left select-none space-y-2.5
-                    {currentTheme === t.id ? 'ring-1 ring-white/20' : 'border-[#263143] hover:border-[#384863]'}"
+                    {currentTheme === th.id ? 'ring-1 ring-white/20' : 'border-[#263143] hover:border-[#384863]'}"
                 >
                   <div class="flex items-center justify-between">
                     <div
                       class="w-6 h-6 rounded-full border border-black/40 shadow-xs flex items-center justify-center relative overflow-hidden"
-                      style="background: radial-gradient(circle at 35% 35%, {t.secondaryHex}, {t.hex});"
+                      style="background: radial-gradient(circle at 35% 35%, {th.secondaryHex}, {th.hex});"
                     >
                       <div class="w-2 h-2 rounded-full bg-white/30"></div>
                     </div>
-                    {#if currentTheme === t.id}
-                      <span style="color: {t.hex};" class="text-xs font-bold">✓</span>
+                    {#if currentTheme === th.id}
+                      <span style="color: {th.hex};" class="text-xs font-bold">✓</span>
                     {/if}
                   </div>
                   <div class="text-[11px] font-semibold text-[#f1f5f9] leading-tight truncate">
-                    {t.name}
+                    {th.name}
                   </div>
                 </button>
               {/each}
@@ -1845,11 +2301,11 @@
 
           <!-- Environment Settings Card -->
           <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] space-y-4">
-            <h2 class="text-sm font-bold text-[#f1f5f9]">Environment & Directories</h2>
+            <h2 class="text-sm font-bold text-[#f1f5f9]">{t('settings.env')}</h2>
 
             <!-- Deadlock Game Path -->
             <div class="space-y-1.5">
-              <div class="text-xs font-semibold text-[#e2e8f0]">Deadlock Installation Directory</div>
+              <div class="text-xs font-semibold text-[#e2e8f0]">{t('settings.deadlock_path')}</div>
               <div class="text-[11px] text-[#828fa3]">
                 Path to the Deadlock game directory (containing <code style="color: var(--accent-light);" class="font-mono">game/citadel</code>).
               </div>
@@ -1857,10 +2313,25 @@
                 id="cfg-deadlock-path"
                 value={config?.deadlock_game_dir || ''}
                 placeholder="C:\SteamLibrary\steamapps\common\Deadlock"
-                actionLabel="Auto-Detect"
+                actionLabel={t('settings.detect')}
                 onaction={detectDeadlock}
                 readonly={true}
               />
+            </div>
+
+            <!-- Camera Calibration Fix -->
+            <div class="pt-3 border-t border-[#212938] flex items-center justify-between gap-3">
+              <div>
+                <div class="text-xs font-semibold text-[#e2e8f0]">{t('settings.camera_fix')}</div>
+                {#if settingsCameraMsg}
+                  <div class="text-[11px] font-mono text-[#34d399] mt-0.5">{settingsCameraMsg}</div>
+                {:else}
+                  <div class="text-[11px] text-[#828fa3]">Writes camera cvars to game/citadel/cfg/dmbk_camera.cfg + autoexec.cfg.</div>
+                {/if}
+              </div>
+              <Button variant="tonal" size="sm" onclick={applyCameraFixFromSettings}>
+                {t('settings.apply_camera_fix')}
+              </Button>
             </div>
 
             <!-- Addons Directory Button -->
@@ -1870,7 +2341,7 @@
                 <div class="text-[11px] text-[#828fa3]">Direct directory where game VPK mod packages reside.</div>
               </div>
               <Button variant="tonal" size="sm" onclick={openAddonsDir}>
-                Open Addons Dir
+                {t('home.open_addons')}
               </Button>
             </div>
 
@@ -1878,7 +2349,7 @@
             <div class="pt-3 border-t border-[#212938] flex items-center justify-between">
               <div>
                 <div class="text-xs font-semibold text-[#e2e8f0]">DMBK Toolkit Workspace</div>
-                <div class="text-[11px] text-[#828fa3]">Local directory where CSDK13 and cache archives are isolated.</div>
+                <div class="text-[11px] text-[#828fa3]">Local directory where CSDK13, session logs and cache archives reside.</div>
               </div>
               <Button variant="tonal" size="sm" onclick={openKitDir}>
                 Open Kit Dir
@@ -1890,7 +2361,7 @@
           <div class="p-4 bg-[#171c26] border border-[#252f40] rounded-[6px] flex items-center justify-between text-xs text-[#828fa3]">
             <div>
               <span class="font-semibold text-[#f1f5f9]">Deadlock Mod Build Kit</span>
-              <span class="font-mono ml-1.5">v0.1.4</span>
+              <span class="font-mono ml-1.5">v0.1.5</span>
             </div>
             <div class="font-mono text-[11px]">
               Author: <span style="color: var(--accent-light);" class="font-bold">str1kez</span>
@@ -1908,6 +2379,7 @@
   <!-- 1. Community Mod Details Modal (GameBanana Preview & Installer) -->
   <ModDetailModal
     modId={selectedModId}
+    itemType={selectedModItemType}
     isOpen={isModModalOpen}
     onClose={() => { isModModalOpen = false; selectedModId = null; }}
     onInstalled={() => { loadAddons(); }}

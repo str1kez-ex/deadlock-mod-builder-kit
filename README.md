@@ -1,4 +1,4 @@
-# Deadlock Mod Build Kit (DMBK)
+# Deadlock Mod Build Kit (DMBK) v1.5
 
 > **All-in-One Mod Manager, VPK Fusion Engine & Toolkit for Valve's Deadlock**  
 > *Developed by str1kez*
@@ -9,13 +9,13 @@
 
 ## ✨ Features
 
-- **🎮 Community Mod Browser**: Direct integration with GameBanana API. Browse, filter by character or category, check response times, and install mods with a single click.
-- **⚡ VPK Fusion Engine**: Pure Rust Source 2 VPK reader & packer (`vpk.rs`). Merge components from different mods (e.g. models from Mod A + custom sounds from Mod B) into a unified `.vpk`.
-- **🛠️ 5-Step Mod Creation Wizard**: Build custom Deadlock mods inspired by Deadlock Mod Builder. Select target heroes, bind custom 3D models, weapons, sounds, and adjust camera calibration.
-- **🔍 Collapsible VPK Asset Inspector**: Inspect installed VPK files, browse internal directory trees (`models/`, `materials/`, `sounds/`), view author info and thumbnail covers.
-- **📊 Tracker (Meta & Builds)**: In-depth competitive meta tier list (winrates, pickrates, GPM, DPM, hard counters, synergies) and item progression build guides.
-- **⚙️ Toolchain Manager**: One-click setup for Source 2 Community SDK (CSDK13) and Source 2 Viewer.
-- **🎨 Dark Tactical UI**: Clean, WCAG-conscious dark theme with customizable accent palettes (Default Green, Neon Cyan, Crimson Red, Deep Violet, Vintage Amber).
+- **🏠 Home Dashboard & Vanilla Isolation**: Quick-launch modded or clean Vanilla Deadlock (`launch_game_vanilla` physically isolates VPK addons while playing Vanilla and safely restores them via `restore_vanilla_addons`), displays Steam Persona/Account ID, Game Build ID, free disk space, and GameBanana ping.
+- **🎮 Community Mod Browser & Multi-VPK Installer**: Direct GameBanana integration (`Mod`, `Tool`, `Sound`, `Wip` with exact `_sProfileUrl` links and Deadlock `_aGame._idRow == 20948` verification), `94vw` expanded detail view with zoomable gallery, HTML5 Audio Preview player, optional Global Mod category support (`UI`, `Sounds`, `Maps`, `Crosshairs`, `Weapons`), and multi-VPK checkbox installation queue (`Downloads` tab with speed & ETA tracking).
+- **🧑‍🎤 Updated Deadlock Hero Roster (45 Heroes)**: Full hero mapping (`Abrams` through `Yamato`, including *Old Gods, New Blood* and *City Never Sleeps* characters) with matched `static/heroes/` portraits across Loadouts, Browser, Meta Tier List, and Mod Wizard.
+- **⚡ VPK Fusion Engine & Mod Creation Wizard**: Pure Rust Source 2 VPK v2 reader/packer (`vpk.rs`) with camera attachment diagnostics on `.vmdl_c` models, real Source 2 `cfg/dmbk_camera.cfg` + `autoexec.cfg` camera fix injection, and a 5-step Mod Creation Wizard.
+- **📊 Live Meta Tier List & Player Profile**: Full 45-hero reactive meta tier list with role filters and search, plus Steam Account ID detection (`get_steam_account`) with direct links to Statlocker and Tracklock.
+- **📜 Persistent Logging, Localization & Scaling**: Automatic session logs in `%LOCALAPPDATA%\DeadlockModKit\logs\`, Deadlock `console.log` viewer, RU/EN UI switcher, and 80%–140% UI scaling.
+- **🔒 Hardened File Handling**: Strict Zip-Slip prevention (Zip/7z/tar), path traversal validation on addon operations (`[a-zA-Z0-9_\-.]` + canonical directory checks), and safe URL/folder opening via `open`.
 
 ---
 
@@ -24,14 +24,14 @@
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://www.rust-lang.org/) & Cargo (stable)
-- Windows 10/11 with WebView2
+- [Rust](https://www.rust-lang.org/) & Cargo (stable, Windows MSVC or `x86_64-pc-windows-gnu` with MinGW)
+- Windows 10/11 with WebView2 Runtime
 
 ### Development
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/deadlock-mod-kit.git
+git clone https://github.com/str1kez-ex/deadlock-mod-builder-kit.git
 cd deadlock-mod-kit
 
 # Install frontend dependencies
@@ -44,14 +44,13 @@ npm run tauri dev
 ### Production Build
 
 ```bash
-# Compile standalone exe and installers (NSIS & MSI)
+# Build Windows installers (NSIS Setup EXE & MSI)
 npm run tauri build
 ```
 
-The output packages will be located in:
-- `src-tauri/target/release/deadlock-mod-kit.exe` (Portable executable)
-- `src-tauri/target/release/bundle/nsis/` (Windows installer)
-- `src-tauri/target/release/bundle/msi/` (MSI package)
+The installer packages will be located in:
+- `src-tauri/target/release/bundle/nsis/` (Windows NSIS installer `.exe`)
+- `src-tauri/target/release/bundle/msi/` (Windows MSI package `.msi`)
 
 ---
 

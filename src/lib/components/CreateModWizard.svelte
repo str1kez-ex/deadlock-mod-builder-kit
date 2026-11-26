@@ -190,8 +190,9 @@
         </p>
 
         <div class="space-y-2">
-          <label class="text-[11px] font-mono text-[#94a3b8]">Model File Path / Name</label>
+          <label for="wizard-model-file" class="text-[11px] font-mono text-[#94a3b8]">Model File Path / Name</label>
           <input
+            id="wizard-model-file"
             type="text"
             bind:value={modelFile}
             placeholder="C:\Mods\models\custom_hero.fbx"
@@ -207,8 +208,9 @@
         </p>
 
         <div class="space-y-2">
-          <label class="text-[11px] font-mono text-[#94a3b8]">Weapon Asset Path</label>
+          <label for="wizard-gun-file" class="text-[11px] font-mono text-[#94a3b8]">Weapon Asset Path</label>
           <input
+            id="wizard-gun-file"
             type="text"
             bind:value={gunFile}
             placeholder="C:\Mods\weapons\custom_gun.glb"
@@ -286,8 +288,9 @@
         </p>
 
         <div class="space-y-1.5">
-          <label class="text-[11px] font-mono text-[#94a3b8]">External Source VPK (Optional)</label>
+          <label for="wizard-fusion-vpk" class="text-[11px] font-mono text-[#94a3b8]">External Source VPK (Optional)</label>
           <input
+            id="wizard-fusion-vpk"
             type="text"
             bind:value={fusionVpk}
             placeholder="e.g. ratking_custom_sounds.vpk"

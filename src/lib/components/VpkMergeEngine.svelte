@@ -113,10 +113,11 @@
             <span>Files: {manifestA.total_files}</span>
             <span>{(manifestA.total_size / 1048576).toFixed(1)} MB</span>
           </div>
-          <div class="flex gap-2 pt-1">
+          <div class="flex flex-wrap gap-2 pt-1">
             {#if manifestA.has_models}<span class="text-[#38bdf8]">✓ Models</span>{/if}
             {#if manifestA.has_materials}<span class="text-[#34d399]">✓ Textures</span>{/if}
             {#if manifestA.has_sounds}<span class="text-[#c084fc]">✓ Sounds</span>{/if}
+            {#if manifestA.has_camera_attachment === false}<span class="text-[#fbbf24]">⚠ No Camera Attachment</span>{/if}
           </div>
         </div>
       {/if}
@@ -145,10 +146,11 @@
             <span>Files: {manifestB.total_files}</span>
             <span>{(manifestB.total_size / 1048576).toFixed(1)} MB</span>
           </div>
-          <div class="flex gap-2 pt-1">
+          <div class="flex flex-wrap gap-2 pt-1">
             {#if manifestB.has_models}<span class="text-[#38bdf8]">✓ Models</span>{/if}
             {#if manifestB.has_materials}<span class="text-[#34d399]">✓ Textures</span>{/if}
             {#if manifestB.has_sounds}<span class="text-[#c084fc]">✓ Sounds</span>{/if}
+            {#if manifestB.has_camera_attachment === false}<span class="text-[#fbbf24]">⚠ No Camera Attachment</span>{/if}
           </div>
         </div>
       {/if}
@@ -201,8 +203,9 @@
 
     <!-- Output VPK Name -->
     <div class="space-y-1.5 pt-2 border-t border-[#1e2535]">
-      <label class="text-[11px] font-mono text-[#828fa3]">Output Merged VPK Filename</label>
+      <label for="merge-output-name" class="text-[11px] font-mono text-[#828fa3]">Output Merged VPK Filename</label>
       <input
+        id="merge-output-name"
         type="text"
         bind:value={outputName}
         class="h-9 w-full max-w-md px-3 bg-[#141926] text-xs font-mono text-[#f1f5f9] rounded border border-[#2a364a] focus:border-[var(--accent-primary)] transition"

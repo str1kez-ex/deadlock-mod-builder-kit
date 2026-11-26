@@ -67,6 +67,11 @@ pub struct AppConfig {
     pub install_dir: PathBuf,
     pub deadlock_game_dir: Option<PathBuf>,
     pub tools: Vec<Tool>,
+    // v1.5 additions — #[serde(default)] preserves upgrade compatibility with v0.1.4 config.json
+    #[serde(default)]
+    pub ui_language: Option<String>,  // "ru" | "en"
+    #[serde(default)]
+    pub ui_scale: Option<u32>,        // 80 | 90 | 100 | 110 | 125 | 140
 }
 
 // ── GameBanana Community Models ──────────────────────────────────────────────
@@ -85,12 +90,13 @@ pub struct GameBananaFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameBananaModItem {
     pub id: u64,
-    pub item_type: String, // "Mod" | "Sound"
+    pub item_type: String, // "Mod" | "Sound" | "Tool" etc – real value from API
     pub name: String,
     pub category: String,
     pub submitter_name: String,
     pub submitter_avatar: String,
     pub thumbnail_url: String,
+    pub profile_url: String, // FIX §2.3: always pass the real _sProfileUrl
     pub views: u64,
     pub likes: u64,
     pub date_added: u64,
@@ -120,7 +126,7 @@ pub struct GameBananaModDetail {
     pub likes: u64,
     pub date_added: u64,
     pub date_updated: u64,
-    pub profile_url: String,
+    pub profile_url: String, // FIX §2.3: always use _sProfileUrl for external links
     pub screenshots: Vec<String>,
     pub files: Vec<GameBananaFile>,
 }
@@ -130,6 +136,7 @@ pub struct CameraFixResult {
     pub patched_count: usize,
     pub verified_count: usize,
     pub message: String,
+    pub autoexec_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +147,26 @@ pub struct ModDownloadProgress {
     pub progress: f32, // 0.0 - 1.0
     pub message: String,
     pub speed_mbps: f32,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    #[serde(default)]
+    pub total_bytes: u64,
+}
+
+/// FIX §2.1 — Result of a Vanilla launch with physical addon isolation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VanillaLaunchResult {
+    pub isolated_count: usize,
+    pub message: String,
+}
+
+/// Log entry for session log file viewer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub time: String,
+    pub level: String,
+    pub message: String,
+    pub source: String, // "app" | "game"
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -156,3 +183,4 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+

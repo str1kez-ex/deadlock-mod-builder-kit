@@ -1,6 +1,6 @@
 [package]
 name = "deadlock-mod-kit"
-version = "0.1.4"
+version = "0.1.5"
 description = "Deadlock Mod Build Kit — Launcher & Tool Manager"
 authors = ["you"]
 edition = "2021"
@@ -40,6 +40,14 @@ log = "0.4"
 dirs = "6"
 steamlocate = "2"
 sevenz-rust = "0.6.1"
+
+# v1.5 additions
+open = "5"                  # Safe cross-platform URL/file opener (replaces cmd /C start, rundll32)
+chrono = { version = "0.4", features = ["serde", "clock"] }  # Session log timestamps
+
+[features]
+# This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
 panic = "abort"

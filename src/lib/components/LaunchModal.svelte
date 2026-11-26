@@ -113,7 +113,7 @@
             In Deadlock's latest engine update (Violet branch), third-person camera attachment offsets broke compatibility with older custom hero models and skins.
           </p>
           <p class="text-[11px] text-[#9ca3af] leading-normal font-mono">
-            Execute the camera calibration fix below to enforce standard FOV, shoulder offsets, and cvar values in your Citadel autoexec before launching.
+            Writes cvars into <code class="text-[#e2e8f0]">game/citadel/cfg/dmbk_camera.cfg</code> and injects <code class="text-[#e2e8f0]">exec dmbk_camera.cfg</code> into <code class="text-[#e2e8f0]">autoexec.cfg</code> so Source 2 loads calibration automatically.
           </p>
         </div>
 

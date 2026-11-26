@@ -206,7 +206,24 @@
                   Textures
                 </span>
               {/if}
+              {#if vpkManifest.has_camera_attachment === true}
+                <span class="px-2 py-0.5 text-[10px] font-mono rounded bg-[#132a1e] text-[#34d399] border border-[#10b981]/30">
+                  ✓ Camera Attachment OK
+                </span>
+              {:else if vpkManifest.has_camera_attachment === false}
+                <span class="px-2 py-0.5 text-[10px] font-mono rounded bg-[#331a0d] text-[#fbbf24] border border-[#f59e0b]/40">
+                  ⚠ Missing Camera Attachment
+                </span>
+              {/if}
             </div>
+
+            {#if vpkManifest.diagnostic_notes?.length > 0}
+              <div class="p-2.5 bg-[#2d1a06] border border-[#f59e0b]/40 rounded-[4px] space-y-1">
+                {#each vpkManifest.diagnostic_notes as note}
+                  <p class="text-[10px] text-[#fbbf24] leading-snug">{note}</p>
+                {/each}
+              </div>
+            {/if}
 
             <!-- File tree list -->
             <div class="max-h-40 overflow-y-auto p-2 bg-[#0c0e14] border border-[#1e2535] rounded-[4px] space-y-1 font-mono text-[10px]">

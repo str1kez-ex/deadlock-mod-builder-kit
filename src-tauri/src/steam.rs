@@ -6,10 +6,53 @@ use std::path::{Path, PathBuf};
 /// Deadlock's Steam App ID
 const DEADLOCK_APP_ID: u32 = 1422450;
 
+/// Full 2026 hero roster (Old Gods New Blood + City Never Sleeps)
 pub const DEADLOCK_HEROES: &[&str] = &[
-    "Abrams", "Bebop", "Calico", "Dynamo", "Grey Talon", "Haze", "Holliday", "Infernus",
-    "Ivy", "Kelvin", "Lady Geist", "Lash", "McGinnis", "Mirage", "Mo & Krill", "Paradox",
-    "Pocket", "Rat King", "Seven", "Shiv", "Vindicta", "Viscous", "Warden", "Wraith", "Wrecker", "Yamato",
+    "Abrams",
+    "Apollo",
+    "Baba",
+    "Bebop",
+    "Billy",
+    "Calico",
+    "Celeste",
+    "Deadman Danny",
+    "Drifter",
+    "Dynamo",
+    "Graves",
+    "Grey Talon",
+    "Haze",
+    "Holliday",
+    "Infernus",
+    "Ivy",
+    "Kelvin",
+    "Lady Geist",
+    "Lash",
+    "McGinnis",
+    "Mina",
+    "Mirage",
+    "Mo & Krill",
+    "Nurse Harrow",
+    "Paige",
+    "Paradox",
+    "Pocket",
+    "Rat King",
+    "Rem",
+    "Seven",
+    "Shiv",
+    "Silver",
+    "Sinclair",
+    "Solomon",
+    "The Doorman",
+    "Venator",
+    "Victor",
+    "Vindicta",
+    "Violet",
+    "Viscous",
+    "Vyper",
+    "Warden",
+    "Wraith",
+    "Wrecker",
+    "Yamato",
 ];
 
 const METADATA_FILE: &str = "dmbk_mods_metadata.json";
@@ -88,23 +131,37 @@ pub fn get_deadlock_build_id() -> String {
 pub fn detect_hero_and_category(filename: &str) -> (Option<String>, String) {
     let lower = filename.to_lowercase();
     let clean = lower.replace(['_', '-', '.'], " ");
+    let padded = format!(" {} ", clean);
 
     let mut detected_hero = None;
     for hero in DEADLOCK_HEROES {
         let h_lower = hero.to_lowercase();
-        if clean.contains(&h_lower) {
+        let needle = format!(" {} ", h_lower);
+        if padded.contains(&needle) {
             detected_hero = Some(hero.to_string());
             break;
         }
-        if *hero == "Lady Geist" && (clean.contains("geist") || clean.contains("ladygeist")) {
+        if *hero == "Lady Geist" && (padded.contains(" geist ") || padded.contains(" ladygeist ")) {
             detected_hero = Some(hero.to_string());
             break;
         }
-        if *hero == "Grey Talon" && (clean.contains("talon") || clean.contains("greytalon")) {
+        if *hero == "Grey Talon" && (padded.contains(" talon ") || padded.contains(" greytalon ")) {
             detected_hero = Some(hero.to_string());
             break;
         }
-        if *hero == "Mo & Krill" && (clean.contains("mokrill") || clean.contains("mo krill") || clean.contains("mo and krill")) {
+        if *hero == "Mo & Krill"
+            && (padded.contains(" mokrill ")
+                || padded.contains(" mo krill ")
+                || padded.contains(" mo and krill "))
+        {
+            detected_hero = Some(hero.to_string());
+            break;
+        }
+        if *hero == "Rat King" && padded.contains(" ratking ") {
+            detected_hero = Some(hero.to_string());
+            break;
+        }
+        if *hero == "The Doorman" && padded.contains(" doorman ") {
             detected_hero = Some(hero.to_string());
             break;
         }
@@ -238,10 +295,18 @@ pub fn list_installed_addons(citadel: &Path) -> Vec<AddonMod> {
     mods
 }
 
-/// Toggle enable/disable of an addon by renaming extension
+/// Toggle enable/disable of an addon by renaming extension.
+/// FIX §2.9 — Path traversal protection via sanitize_addon_filename + assert_inside_addons.
 pub fn toggle_addon(citadel: &Path, filename: &str, enable: bool) -> Result<()> {
+    // Sanitize input filename
+    sanitize_addon_filename(filename)?;
+
     let addons = addons_dir(citadel)?;
     let current_path = addons.join(filename);
+
+    // Confirm the resolved path is inside addons/
+    assert_inside_addons(&addons, &current_path)?;
+
     if !current_path.exists() {
         anyhow::bail!("Addon file not found: {}", filename);
     }
@@ -260,7 +325,10 @@ pub fn toggle_addon(citadel: &Path, filename: &str, enable: bool) -> Result<()> 
         }
     };
 
-    let target_path = addons.join(target_name);
+    let target_path = addons.join(&target_name);
+    // Confirm destination is also inside addons/
+    assert_inside_addons(&addons, &target_path)?;
+
     std::fs::rename(current_path, target_path)?;
     Ok(())
 }
@@ -283,85 +351,230 @@ pub fn set_active_hero_mod(citadel: &Path, hero_name: &str, active_filename: Opt
     Ok(())
 }
 
-/// Launches Deadlock via Steam URI.
+/// FIX §5.2 — Launches Deadlock via Steam URI using the `open` crate (not cmd /C start).
 pub fn launch_deadlock() -> Result<()> {
-    let uri = format!("steam://rungameid/{}", DEADLOCK_APP_ID);
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &uri])
-            .spawn()
-            .context("Failed to launch Deadlock via Steam URI")?;
+    let uri = format!("steam://run/{}", DEADLOCK_APP_ID);
+    open::that_detached(&uri).context("Failed to launch Deadlock via Steam URI")?;
+    Ok(())
+}
+
+/// Sanitize a filename: allow only [a-zA-Z0-9_\-\.], reject ".." and slashes (§5.1).
+/// Returns error if the resulting path would escape the addons directory.
+pub fn sanitize_addon_filename(filename: &str) -> Result<String> {
+    // Reject empty or special dot segments
+    if filename.is_empty() || filename == "." || filename == ".." {
+        anyhow::bail!("Filename must not be empty or dot segment");
     }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&uri)
-            .spawn()
-            .context("Failed to launch Deadlock via xdg-open")?;
+    // Reject path separators and parent-traversal sequences
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        anyhow::bail!("Invalid filename: path separators or traversal sequences are not allowed");
+    }
+    // Allowlist: only alphanumeric, underscore, dash, dot
+    let valid = filename
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
+    if !valid {
+        anyhow::bail!("Invalid filename: only [a-zA-Z0-9_\\-.] are permitted");
+    }
+    Ok(filename.to_string())
+}
+
+/// Normalize an external/extracted filename so it conforms strictly to `[a-zA-Z0-9_\-.]`.
+/// Ensures any mod downloaded from GameBanana or created by the user can later be safely toggled/deleted.
+pub fn sanitize_incoming_vpk_filename(raw: &str) -> String {
+    let base = Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("mod.vpk");
+    let mut cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", "_");
+    }
+    cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() {
+        "custom_mod.vpk".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Returns free disk space in bytes on the partition containing `path` (if supported).
+#[cfg(windows)]
+pub fn get_disk_free_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+    }
+    let check_path = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.ancestors().find(|p| p.exists())?.to_path_buf()
+    };
+    let wide: Vec<u16> = check_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_avail: u64 = 0;
+    let mut total: u64 = 0;
+    let mut total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_avail,
+            &mut total,
+            &mut total_free,
+        )
+    };
+    if ok != 0 {
+        Some(free_avail)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+pub fn get_disk_free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Verify that the resolved path is strictly inside the addons directory.
+/// Prevents path-traversal even after sanitization (belt-and-suspenders).
+pub fn assert_inside_addons(addons: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    // canonicalize requires the path to exist; for new files use the parent
+    let check_path = if target.exists() {
+        target
+            .canonicalize()
+            .with_context(|| format!("Cannot canonicalize target path: {}", target.display()))?
+    } else if let Some(parent) = target.parent() {
+        parent
+            .canonicalize()
+            .with_context(|| format!("Cannot canonicalize parent path: {}", parent.display()))?
+            .join(target.file_name().unwrap_or_default())
+    } else {
+        anyhow::bail!("Cannot determine parent directory for target path");
+    };
+
+    let canon_addons = addons
+        .canonicalize()
+        .with_context(|| format!("Cannot canonicalize addons dir: {}", addons.display()))?;
+
+    if !check_path.starts_with(&canon_addons) {
+        anyhow::bail!(
+            "Security: resolved path '{}' escapes the addons directory '{}'",
+            check_path.display(),
+            canon_addons.display()
+        );
     }
     Ok(())
 }
 
-/// Launches Deadlock via Steam with addons disabled (-disableaddons)
-pub fn launch_deadlock_vanilla() -> Result<()> {
-    let uri = format!("steam://rungameid/{}//-disableaddons", DEADLOCK_APP_ID);
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &uri])
-            .spawn()
-            .context("Failed to launch Deadlock via Steam URI")?;
+/// FIX §2.1 — Physical isolation of addons before Vanilla launch.
+/// Renames all .vpk files to .vpk.vanilla_off so Source 2 cannot mount them.
+/// Returns the list of renamed files for restoration.
+pub fn isolate_addons_for_vanilla(citadel: &std::path::Path) -> Result<Vec<PathBuf>> {
+    let addons = addons_dir(citadel)?;
+    let mut renamed = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&addons) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let fname = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if fname.ends_with(".vpk") {
+                    // Skip DMBK internal files
+                    if fname.starts_with("dmbk_") {
+                        continue;
+                    }
+                    let new_path = addons.join(format!("{}.vanilla_off", fname));
+                    std::fs::rename(&path, &new_path).with_context(|| {
+                        format!("Failed to isolate addon: {}", fname)
+                    })?;
+                    renamed.push(new_path);
+                }
+            }
+        }
     }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&uri)
-            .spawn()
-            .context("Failed to launch Deadlock via xdg-open")?;
-    }
-    Ok(())
+    Ok(renamed)
 }
 
-/// Opens a path in the system file manager (Explorer on Windows, xdg-open on Linux)
+/// Restores addons after Vanilla session by renaming .vpk.vanilla_off back to .vpk.
+pub fn restore_addons_after_vanilla(citadel: &std::path::Path) -> Result<usize> {
+    let addons = addons_dir(citadel)?;
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(&addons) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let fname = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if fname.ends_with(".vpk.vanilla_off") {
+                    let original = fname.trim_end_matches(".vanilla_off").to_string();
+                    let orig_path = addons.join(&original);
+                    std::fs::rename(&path, &orig_path).with_context(|| {
+                        format!("Failed to restore addon: {}", fname)
+                    })?;
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// FIX §2.1 — Launches Deadlock in vanilla mode with physical addon isolation.
+pub fn launch_deadlock_vanilla(citadel: &std::path::Path) -> Result<usize> {
+    let count = isolate_addons_for_vanilla(citadel)?;
+    let isolated = count.len();
+    let uri = format!("steam://run/{}", DEADLOCK_APP_ID);
+    open_in_browser(&uri)?;
+    Ok(isolated)
+}
+
+/// FIX §5.2 — Opens a path in the system file manager using the `open` crate.
 pub fn open_in_file_manager(path: &Path) -> Result<()> {
     if !path.exists() {
         std::fs::create_dir_all(path)?;
     }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(path.as_os_str())
-            .spawn()
-            .context("Failed to open path in Windows Explorer")?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path.as_os_str())
-            .spawn()
-            .context("Failed to open path in file manager")?;
-    }
+    open::that_detached(path).context("Failed to open path in file manager")?;
     Ok(())
 }
 
-/// Opens a web URL in the user's default browser
+/// FIX §5.2 — Opens a web URL in the user's default browser using the `open` crate
+/// (safe alternative to rundll32 / cmd /C start with raw string concatenation).
 pub fn open_in_browser(url: &str) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", url])
-            .spawn()
-            .context("Failed to open URL in browser")?;
+    // Reject whitespace/control characters that could confuse URI handlers
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        anyhow::bail!("Blocked: URL must not contain whitespace or control characters");
     }
-    #[cfg(target_os = "linux")]
+    // Strict scheme allowlist — prevents opening arbitrary shell commands or local files
+    if !url.starts_with("http://")
+        && !url.starts_with("https://")
+        && !url.starts_with("steam://")
     {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .context("Failed to open URL in browser")?;
+        anyhow::bail!("Blocked: only http, https and steam:// URLs are allowed");
     }
+    open::that_detached(url).context("Failed to open URL in browser")?;
     Ok(())
 }
 

@@ -24,6 +24,10 @@ pub struct VpkManifest {
     pub has_models: bool,
     pub has_sounds: bool,
     pub has_materials: bool,
+    #[serde(default)]
+    pub has_camera_attachment: Option<bool>,
+    #[serde(default)]
+    pub diagnostic_notes: Vec<String>,
     pub files: Vec<VpkEntryInfo>,
 }
 
@@ -201,6 +205,8 @@ impl<R: Read + Seek> VpkReader<R> {
             has_models,
             has_sounds,
             has_materials,
+            has_camera_attachment: None,
+            diagnostic_notes: Vec::new(),
             files,
         }
     }
@@ -219,6 +225,9 @@ impl VpkWriter {
 
     pub fn add_file(&mut self, full_path: &str, data: Vec<u8>) {
         let clean_path = full_path.replace('\\', "/").trim_start_matches('/').to_string();
+        if clean_path.split('/').any(|seg| seg == "..") || clean_path.contains(':') {
+            return;
+        }
         self.files.insert(clean_path, data);
     }
 
@@ -337,18 +346,61 @@ pub fn calculate_crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// Inspects a VPK file on disk and returns its manifest and tree
+/// Checks compiled Source 2 model (.vmdl_c) bytes for camera/eye attachment metadata (§2.2).
+fn check_vmdl_camera_attachment(bytes: &[u8]) -> bool {
+    let lower: Vec<u8> = bytes
+        .iter()
+        .take(2 * 1024 * 1024)
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    lower.windows(6).any(|w| w == b"camera")
+        || lower.windows(11).any(|w| w == b"eyeposition")
+        || lower.windows(10).any(|w| w == b"attachment")
+}
+
+/// Inspects a VPK file on disk and returns its manifest, tree, and model camera diagnostics (§2.2).
 pub fn inspect_vpk_file<P: AsRef<Path>>(path: P) -> Result<VpkManifest> {
     let file = std::fs::File::open(path.as_ref())
         .with_context(|| format!("Failed to open VPK file: {:?}", path.as_ref()))?;
-    let reader = VpkReader::new(file)?;
+    let mut reader = VpkReader::new(file)?;
     let filename = path
         .as_ref()
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown.vpk")
         .to_string();
-    Ok(reader.manifest(filename))
+    let mut manifest = reader.manifest(filename);
+
+    // Inspect compiled hero models (.vmdl_c) for camera attachment point (TZ §2.2.3)
+    let hero_models: Vec<String> = manifest
+        .files
+        .iter()
+        .filter(|f| {
+            f.extension.eq_ignore_ascii_case("vmdl_c")
+                && (f.path.to_lowercase().contains("heroes") || f.path.to_lowercase().contains("models"))
+        })
+        .map(|f| f.full_path.clone())
+        .collect();
+
+    if !hero_models.is_empty() {
+        let mut any_has_camera = false;
+        for mpath in &hero_models {
+            if let Ok(bytes) = reader.read_file(mpath) {
+                if check_vmdl_camera_attachment(&bytes) {
+                    any_has_camera = true;
+                    break;
+                }
+            }
+        }
+        manifest.has_camera_attachment = Some(any_has_camera);
+        if !any_has_camera {
+            manifest.diagnostic_notes.push(
+                "No camera attachment found in compiled .vmdl_c model(s). Apply Camera Fix if third-person view is offset.".into(),
+            );
+        }
+    }
+
+    Ok(manifest)
 }
 
 /// Merges multiple VPKs based on selected categories or file filters.

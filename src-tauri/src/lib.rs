@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod installer;
+pub mod logger;
 mod models;
 mod steam;
 pub mod vpk;
@@ -8,6 +9,7 @@ pub mod vpk;
 use commands::AppState;
 use config::load_config;
 use std::sync::Mutex;
+use tauri::Manager;
 
 fn default_install_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
@@ -20,6 +22,11 @@ pub fn run() {
     let install_dir = default_install_dir();
     let _ = std::fs::create_dir_all(&install_dir);
 
+    // Start session logger
+    let session_logger = logger::SessionLogger::new(&install_dir);
+    session_logger.start_session();
+    session_logger.write("info", "Deadlock Mod Build Kit v1.5 started");
+
     let config = load_config(&install_dir);
 
     tauri::Builder::default()
@@ -28,6 +35,14 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .manage(AppState(Mutex::new(config)))
+        .manage(commands::LoggerState(session_logger))
+        .on_page_load(|webview, payload| {
+            let state = webview.app_handle().state::<commands::LoggerState>();
+            state.0.write(
+                "info",
+                &format!("WebView page_load {:?}: {}", payload.event(), payload.url()),
+            );
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::set_install_dir,
@@ -54,12 +69,21 @@ pub fn run() {
             commands::set_hero_mod,
             commands::ping_gamebanana,
             commands::launch_game_vanilla,
+            commands::restore_vanilla_addons,
             commands::fix_mods_camera,
             commands::get_deadlock_build_version,
             commands::inspect_vpk,
             commands::merge_addon_vpks,
             commands::create_custom_mod,
+            // v1.5 new commands
+            commands::get_game_logs,
+            commands::open_logs_folder,
+            commands::set_ui_language,
+            commands::set_ui_scale,
+            commands::write_session_log,
+            commands::save_logs_dialog,
+            commands::get_disk_free_space,
         ])
         .run(tauri::generate_context!())
-        .expect("Error running Deadlock Mod Kit");
+        .expect("Error running Deadlock Mod Kit")
 }
